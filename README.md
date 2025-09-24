@@ -1,5 +1,7 @@
 # Bigdata_Proj
 
+[![CI](https://github.com/umyunsang/Bigdata_Proj/actions/workflows/ci.yml/badge.svg)](https://github.com/umyunsang/Bigdata_Proj/actions/workflows/ci.yml) ![Python](https://img.shields.io/badge/python-3.12%2B-blue) [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
+
 소셜 비디오 빅데이터 실시간 처리 플랫폼을 위한 프로젝트입니다. 유튜브 등 소셜 미디어 데이터의 수집·전처리·분석을 스트리밍/배치 파이프라인으로 설계하고, 핵심 확률적 자료구조(Reservoir Sampling, Bloom Filter, HyperLogLog)와 다목적 최적화(Pareto Front)를 활용하는 것이 목표입니다.
 
 ## 주요 기능
@@ -48,3 +50,30 @@ python path/to/your_script.py --config config.yaml
 - Python: 3.12+
 - 라이선스: 추후 명시
 
+
+## 예시 실행
+```
+python examples/stream_algorithms_demo.py
+```
+
+## 디렉터리 개요(요약)
+```
+합계 88
+drwxrwxr-x  9 student_15030 student_15030  4096  9월 24 19:05 .
+drwxr-x--- 32 student_15030 student_15030  4096  9월 24 19:03 ..
+-rw-rw-r--  1 student_15030 student_15030  8196  9월 23 15:21 .DS_Store
+drwxrwxr-x  8 student_15030 student_15030  4096  9월 24 19:03 .git
+drwxrwxr-x  3 student_15030 student_15030  4096  9월 24 19:05 .github
+-rw-rw-r--  1 student_15030 student_15030   194  9월 24 18:59 .gitignore
+-rw-rw-r--  1 student_15030 student_15030   686  9월 24 19:05 LICENSE
+-rw-rw-r--  1 student_15030 student_15030  2295  9월 24 19:03 README.md
+drwxrwxr-x  7 student_15030 student_15030  4096  9월 23 15:26 bigdata_env
+drwxrwxr-x  2 student_15030 student_15030  4096  9월 24 16:58 docs
+drwxrwxr-x  2 student_15030 student_15030  4096  9월 24 19:05 examples
+-rw-rw-r--  1 student_15030 student_15030  6120  9월 23 16:34 report.md
+-rw-rw-r--  1 student_15030 student_15030  3330  9월 24 19:02 requirements.txt
+drwxrwxr-x  9 student_15030 student_15030  4096  9월 24 18:11 video-social-rtp-snippets
+-rw-rw-r--  1 student_15030 student_15030 14147  9월 24 18:20 보고서_초안.md
+drwxrwxr-x  5 student_15030 student_15030  4096  9월 24 18:39 실습자료_2024
+
+```
