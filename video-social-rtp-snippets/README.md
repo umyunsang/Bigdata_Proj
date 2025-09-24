@@ -25,3 +25,32 @@ python jobs/00_fetch_to_landing.py
 # Submit other snippets with spark-submit (Delta package required)
 ```
 
+## One-folder Runner (docs 00→05)
+
+This folder now contains a simple one-folder CLI and doc-named runners so you can execute all phases without leaving this directory.
+
+- CLI: `python cli.py [scaffold|fetch|bronze|silver|gold|train|predict|ui]`
+- Doc-mapped runners:
+  - `00_프로젝트_개요_및_아키텍처.py` – overview + scaffold
+  - `01_데이터_수집_및_배치_ETL_설계.py` – fetch → bronze
+  - `02_스트리밍_데이터_처리_설계.py` – silver (streaming, blocking)
+  - `03_피처_엔지니어링_및_라벨링_설계.py` – gold
+  - `04_모델_학습_및_최적화_설계.py` – train
+  - `05_실시간_예측_시스템_설계.py` – ui (Streamlit)
+
+Examples:
+```bash
+# Create local paths under ./data and ./chk
+python scaffold_paths.py
+
+# Orchestration via CLI
+python cli.py fetch
+python cli.py bronze
+python cli.py silver   # streaming (Ctrl+C to stop)
+python cli.py gold --top-pct 0.9
+python cli.py train
+python cli.py ui
+
+# Doc-mapped runners (Korean filenames)
+python 01_데이터_수집_및_배치_ETL_설계.py
+```

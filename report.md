@@ -129,3 +129,24 @@
   - `requirements.txt` (pyspark, delta-spark, mlflow, streamlit 등)
 - **README:**  
   - 퀵스타트와 전체 실행 순서 포함
+
+---
+
+## 제출 구조 및 실제 경로 안내
+
+본 리포지토리에서는 스니펫 실행 파일들이 `video-social-rtp-snippets/` 폴더 하위에 있습니다. 과제 제출물은 단일 폴더 `submission/` 하위에 정리합니다.
+
+- 실행 스니펫 경로(상대):
+  - `video-social-rtp-snippets/scaffold_paths.py`
+  - `video-social-rtp-snippets/jobs/00_fetch_to_landing.py`
+  - `video-social-rtp-snippets/jobs/10_bronze_batch.py`
+  - `video-social-rtp-snippets/jobs/20_silver_stream.py`
+  - `video-social-rtp-snippets/jobs/30_gold_features.py`
+  - `video-social-rtp-snippets/jobs/40_train_pareto.py`
+  - `video-social-rtp-snippets/jobs/50_predict_stream.py` (선택)
+  - `video-social-rtp-snippets/app/app.py`
+
+- 제출 폴더(단일): `submission/`
+  - `과제01_데이터수집_ETL/` ~ `과제05_실시간예측_UI/`
+  - 스크린샷 파일명 예: `과제01_스크린샷_fetch_성공.png`
+  - 상세 가이드: `docs/과제제출_가이드.md`

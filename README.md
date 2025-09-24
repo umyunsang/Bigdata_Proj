@@ -18,7 +18,7 @@
 - `report.md`, `보고서_초안.md`: 설계/배경 정리 문서
 
 ## 빠른 시작
-사전 준비: Python 3.12+, Java(스파크 사용 시), Git
+사전 준비: Python 3.12+, (옵션) Java/Spark, Git
 
 설치
 ```
@@ -27,20 +27,74 @@ source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 pip install -r requirements.txt
 ```
 
-실행 예시(개발용)
+스니펫 실행 예시 및 프로젝트 스캐폴딩
 ```
-# 예) 데이터 수집/전처리 스크립트 실행
-python path/to/your_script.py --config config.yaml
+# 0) 프로젝트 경로 스캐폴딩(권장)
+cp -n .env.example .env || true
+make scaffold   # 혹은: python scripts/scaffold_project.py
+                 # 생성 경로 기본값: project/{data,chk,logs,artifacts}
+
+# 1) 모의 이벤트 생성(landing)
+python video-social-rtp-snippets/jobs/00_fetch_to_landing.py
+
+# 2) 배치 적재 -> Bronze(Delta)
+python video-social-rtp-snippets/jobs/10_bronze_batch.py
+
+# 3) 스트리밍 윈도우 집계 -> Silver (블로킹 실행)
+python video-social-rtp-snippets/jobs/20_silver_stream.py
+
+# 4) Gold 피처/라벨 생성(CDF 컷 적용)
+python video-social-rtp-snippets/jobs/30_gold_features.py
+
+# 5) 다중모델 학습 및 Pareto 프론트 출력
+python video-social-rtp-snippets/jobs/40_train_pareto.py
+
+# (옵션) 예측값 적재 및 대시보드 실행
+python video-social-rtp-snippets/jobs/50_predict_stream.py
+python video-social-rtp-snippets/app/app.py
+```
+
+과제별 실행(00→05 단계)
+```
+# 00단계: 경로 스캐폴딩
+cp -n .env.example .env || true
+make scaffold   # project/ 하위 디렉토리 생성
+
+# 01단계: 수집→배치 ETL
+python video-social-rtp-snippets/jobs/00_fetch_to_landing.py
+python video-social-rtp-snippets/jobs/10_bronze_batch.py
+
+# 02단계: 스트리밍 집계(Silver)
+python video-social-rtp-snippets/jobs/20_silver_stream.py
+
+# 03단계: Gold 피처/라벨(CDF 컷)
+python -m video_social_rtp.cli gold --top-pct 0.9   # Spark 불가 시: --fallback-local
+
+# 04단계: 다중모델 학습/Pareto 프론트
+python -m video_social_rtp.cli train            # Spark 불가 시: --fallback-local, MLflow 해제: --no-mlflow
+
+# 05단계: (옵션) 예측/대시보드
+python video-social-rtp-snippets/jobs/50_predict_stream.py   # (선택)
+python -m video_social_rtp.cli ui                            # Streamlit UI 실행
 ```
 
 ## 문서
-핵심 설계 문서들은 `docs/` 디렉터리에 정리되어 있습니다.
-- 00_프로젝트_개요_및_아키텍처.md: 전체 아키텍처 개요
-- 01_데이터_수집_및_배치_ETL_설계.md: 배치 수집/ETL 설계
-- 02_스트리밍_데이터_처리_설계.md: 실시간 파이프라인 설계
-- 03_피처_엔지니어링_및_라벨링_설계.md: 피처/라벨링 전략
-- 04_모델_학습_및_최적화_설계.md: 학습/평가/최적화(파레토 프론트)
-- 05_실시간_예측_시스템_설계.md: 서빙/모니터링
+핵심 설계 문서들은 `docs/`에 정리되어 있습니다.
+- 인덱스: `docs/README.md`
+- 제출 가이드: `docs/과제제출_가이드.md`
+- 상세 설계: `docs/00~05_*.md` 일련 파일들
+- 실습자료 스택 준수: `docs/WORKFLOW_RULES.md`의 "실습자료_2024 기술스택 준수" 섹션 참고 (PySpark/Pandas/YouTube API/Streamlit 등).
+
+## 데이터 경로(기본값)
+스니펫은 `video-social-rtp-snippets/data` 및 `video-social-rtp-snippets/chk` 하위 경로를 사용합니다. 이미 샘플 데이터가 포함되어 있어 빠르게 전체 흐름을 확인할 수 있습니다. 환경변수로 경로를 바꾸려면 아래를 설정하세요.
+
+```
+export LANDING_DIR=path/to/data/landing
+export BRONZE_DIR=path/to/data/bronze
+export SILVER_DIR=path/to/data/silver
+export GOLD_DIR=path/to/data/gold
+export CHECKPOINT_DIR=path/to/chk
+```
 
 ## 개발 노트
 - 가상환경 디렉터리 `bigdata_env/`는 리포에서 제외합니다.
@@ -51,10 +105,12 @@ python path/to/your_script.py --config config.yaml
 - 라이선스: 추후 명시
 
 
-## 예시 실행
-```
-python examples/stream_algorithms_demo.py
-```
+## 제출 폴더
+모든 제출 산출물은 단일 폴더 `submission/` 하위에 정리합니다.
+- `submission/README.md`
+- `submission/과제01_데이터수집_ETL/` ~ `submission/과제05_실시간예측_UI/`
+- 스크린샷 파일명 규칙: `과제NN_스크린샷_{설명}.png`
+자세한 내용은 `docs/과제제출_가이드.md`를 참고하세요.
 
 ## 디렉터리 개요(요약)
 ```

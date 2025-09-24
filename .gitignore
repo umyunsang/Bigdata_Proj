@@ -23,3 +23,5 @@ yarn-error.log*
 *.swp
 *.swo
 bigdata_env/
+project/
+submission/*.zip
