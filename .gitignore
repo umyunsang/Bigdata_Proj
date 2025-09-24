@@ -1,0 +1,20 @@
+# Ignore everything by default
+/*
+
+# Allow only these project directories
+!lora_project/
+!neural_network/
+!sw_2nd/
+
+# Within allowed dirs, ignore common junk
+lora_project/.env
+lora_project/.DS_Store
+lora_project/node_modules/
+
+neural_network/.env
+neural_network/.DS_Store
+neural_network/__pycache__/
+
+sw_2nd/.env
+sw_2nd/.DS_Store
+sw_2nd/node_modules/
