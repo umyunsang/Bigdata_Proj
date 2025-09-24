@@ -1,0 +1,25 @@
+# 무료 YouTube API 사용을 위한 최적화 설정
+
+# API 사용 제한 설정
+api_limits:
+  daily_quota: 10000  # 일일 무료 할당량
+  max_requests_per_hour: 100  # 시간당 최대 요청 수
+  batch_size: 50  # 배치 크기 (한 번에 처리할 아이템 수)
+  
+# 비용 최적화 설정
+optimization:
+  use_mock_data: true  # Mock 데이터 우선 사용
+  cache_duration: 3600  # 캐시 지속 시간 (초)
+  retry_attempts: 3  # 재시도 횟수
+  
+# API 호출 패턴
+api_patterns:
+  preferred_method: "videos"  # Search(100 units) 대신 Videos(1 unit) 사용
+  max_results_per_request: 50  # 요청당 최대 결과 수
+  sleep_between_requests: 1  # 요청 간 대기 시간 (초)
+  
+# 모니터링 설정
+monitoring:
+  track_quota_usage: true  # 할당량 사용량 추적
+  alert_threshold: 0.8  # 경고 임계값 (80%)
+  log_api_calls: true  # API 호출 로깅
