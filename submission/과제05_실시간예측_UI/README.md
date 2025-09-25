@@ -1,18 +1,11 @@
-## 과제05 — 실시간 예측/조회 UI (Streamlit)
+# Assignment 05 · Real-time Prediction UI
 
-프로젝트 CLI(추천)
-- UI 실행: `python -m video_social_rtp.cli ui` (기본 포트 8501)
-- 수동 실행: `streamlit run video_social_rtp/serve/ui.py --server.port=8501`
+This directory showcases the Streamlit dashboard built on top of the streaming/gold artifacts for real-time insight and inference.
 
-입력/출력 경로
-- 입력: `project/data/silver/social_metrics/*.csv`(폴백), `project/data/gold/features.csv`, `project/artifacts/gold_cutoff.json`
-- 출력: 스크린샷(대시보드 화면), (선택) 예측 append 결과
-
-권장 스크린샷 체크리스트
-- Bloom 존재 가능성(근사) 메트릭
-- Gold CDF/PDF 차트 + 컷오프 표시
-- Top-K 상승(최근 윈도우 count 기준) 테이블
-
-스니펫 경로(참고)
-- `python video-social-rtp-snippets/jobs/50_predict_stream.py`
-
+## Screenshots
+- `Streamlit UI 실행.png`: Proof that the Streamlit server launches successfully for the Step 05 interface.
+- `사이드바 입력.png`: Sidebar controls demonstrating how operators supply a `video_id`, adjust Top-K windows, and toggle parameters.
+- `Bloom Filter 체크.png`: Bloom-style existence check summarizing whether the selected video appears in the recent streaming window.
+- `CDF:PDF 차트.png`: Dual chart rendering (CDF/PDF) of engagement scores, annotated with the gold-layer cut-off.
+- `Top-K 테이블.png`: Table of top-K trending videos derived from the latest silver metrics.
+- `예측 결과.png`: Highlight of per-video feature/label details returned to the user, simulating real-time scoring output.
