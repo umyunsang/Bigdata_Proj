@@ -8,6 +8,7 @@ from typing import Dict, Optional
 
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
+from ..core.spark_env import get_spark_session
 
 
 @dataclass
@@ -33,47 +34,52 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     # Try Spark first unless forced fallback
     if not use_fallback:
         try:
-            from pyspark.sql import SparkSession
             from pyspark.sql.functions import approx_count_distinct as acd, col
+
+            spark = None
             try:
-                from delta import configure_spark_with_delta_pip  # type: ignore
-            except Exception:
-                configure_spark_with_delta_pip = None
+                spark, delta_enabled = get_spark_session("gold_features", s, log=log)
 
-            builder = (
-                SparkSession.builder.appName("gold_features")
-                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-                .config("spark.sql.warehouse.dir", str((s.project_root / "warehouse").resolve()))
-            )
-            spark = configure_spark_with_delta_pip(builder).getOrCreate() if configure_spark_with_delta_pip else builder.getOrCreate()
+                silver_path = Path(s.silver_dir) / "social_metrics"
+                metrics = None
+                formats = ["delta", "parquet"] if delta_enabled else ["parquet", "delta"]
+                for fmt in formats:
+                    try:
+                        metrics = spark.read.format(fmt).load(str(silver_path))
+                        break
+                    except Exception:
+                        continue
+                if metrics is None:
+                    raise FileNotFoundError(f"silver_metrics_not_found={silver_path}")
 
-            silver_path = str(Path(s.silver_dir) / "social_metrics")
-            metrics = spark.read.format("delta").load(silver_path)
-            # Aggregate engagement per video over available windows
-            eng = metrics.select("video_id", "count").groupBy("video_id").sum("count").withColumnRenamed("sum(count)", "engagement_24h")
-            uniq_est = metrics.groupBy("video_id").agg(acd("video_id").alias("uniq_users_est"))
-            joined = eng.join(uniq_est, "video_id", "left")
-            # empty guard
-            if not joined.take(1):
+                eng = metrics.select("video_id", "count").groupBy("video_id").sum("count").withColumnRenamed("sum(count)", "engagement_24h")
+                uniq_est = metrics.groupBy("video_id").agg(acd("video_id").alias("uniq_users_est"))
+                joined = eng.join(uniq_est, "video_id", "left")
+                if not joined.take(1):
+                    out = Path(s.gold_dir) / "features"
+                    (joined.limit(0).write.format("delta" if delta_enabled else "parquet").mode("overwrite").save(str(out)))
+                    art = _write_artifact(0.0, params.top_pct)
+                    log.info(f"gold_delta_empty={out}")
+                    return {"path": str(out), "cutoff": "0.0", "artifact": str(art)}
+
+                try:
+                    cut_list = joined.approxQuantile("engagement_24h", [params.top_pct], 0.001)
+                    cut = float(cut_list[0]) if cut_list else 0.0
+                except Exception:
+                    cut = 0.0
+                labeled = joined.withColumn("label", (col("engagement_24h") >= cut).cast("int"))
+
                 out = Path(s.gold_dir) / "features"
-                (joined.limit(0).write.format("delta").mode("overwrite").save(str(out)))
-                art = _write_artifact(0.0, params.top_pct)
-                log.info(f"gold_delta_empty={out}")
-                return {"path": str(out), "cutoff": "0.0", "artifact": str(art)}
-            # quantile with guard
-            try:
-                cut_list = joined.approxQuantile("engagement_24h", [params.top_pct], 0.001)
-                cut = float(cut_list[0]) if cut_list else 0.0
-            except Exception:
-                cut = 0.0
-            labeled = joined.withColumn("label", (col("engagement_24h") >= cut).cast("int"))
-
-            out = Path(s.gold_dir) / "features"
-            (labeled.write.format("delta").mode("overwrite").save(str(out)))
-            art = _write_artifact(float(cut), params.top_pct)
-            log.info(f"gold_delta_written={out}")
-            return {"path": str(out), "cutoff": str(cut), "artifact": str(art)}
+                (labeled.write.format("delta" if delta_enabled else "parquet").mode("overwrite").save(str(out)))
+                art = _write_artifact(float(cut), params.top_pct)
+                log.info(f"gold_delta_written={out}")
+                return {"path": str(out), "cutoff": str(cut), "artifact": str(art)}
+            finally:
+                if spark is not None:
+                    try:
+                        spark.stop()
+                    except Exception:
+                        pass
         except Exception as e:
             log.info(f"gold_fallback_reason={e}")
 

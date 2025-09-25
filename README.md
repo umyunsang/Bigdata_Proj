@@ -116,6 +116,31 @@ python -m video_social_rtp.cli ui --port 8501
 - **Logging**: `video_social_rtp/core/logging.py`에서 JSON 포맷 로그를 남기고, `project/logs/`에서 확인할 수 있습니다.
 - **Artifacts**: Gold 컷오프(`project/artifacts/gold_cutoff.json`), Pareto 결과(`project/artifacts/pareto.json`), MLflow 런 등이 자동 저장됩니다.
 
+### 자동화 시스템 (85일간 데이터 축적)
+- **매일 자동 실행**: cron 작업을 통해 매일 오전 9시에 자동으로 YouTube API 데이터 수집 및 Spark 처리
+- **85일간 지속**: 마감일(2025-12-19)까지 매일 자동으로 K-POP 관련 데이터 축적
+- **백그라운드 실행**: SSH 연결이 끊어져도 nohup을 통해 백그라운드에서 계속 실행
+- **주간 분석**: 매주 일요일 오전 10시에 자동으로 주간 분석 리포트 생성
+- **API 할당량 관리**: YouTube Data API v3 일일 할당량(10,000 units) 내에서 안전하게 운영
+
+#### 자동화 설정 방법
+```bash
+# Cron 작업 설정
+crontab -e
+
+# 다음 내용 추가:
+# 매일 오전 9시에 데이터 축적 실행
+0 9 * * * nohup /home/student_15030/Bigdata_Proj/scripts/daily_automation.sh >/dev/null 2>&1
+
+# 매주 일요일 오전 10시에 주간 분석 실행  
+0 10 * * 0 nohup /home/student_15030/Bigdata_Proj/scripts/weekly_analysis.sh >/dev/null 2>&1
+```
+
+#### 자동화 스크립트
+- `scripts/daily_automation.sh`: 매일 YouTube API 데이터 수집 및 Spark 파이프라인 실행
+- `scripts/weekly_analysis.sh`: 주간 데이터 분석 및 리포트 생성
+- `scripts/setup_cron.sh`: Cron 작업 자동 설정 스크립트
+
 ## Reports & Submission Assets
 - `report.md`, `보고서_초안.md`, `submission/보고서_최종.md`에 배경 조사와 설계 근거가 정리되어 있습니다.
 - `submission/` 폴더는 과제별 산출물(스크린샷, 실행 로그, 설명)을 단계별로 모아둔 제출 패키지입니다.

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
+from ..core.spark_env import get_spark_session
 
 
 @dataclass
@@ -44,80 +45,84 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
     ensure_dirs(s)
     log = setup_logging("train")
 
-    from pyspark.sql import SparkSession
     from pyspark.ml import Pipeline
     from pyspark.ml.feature import VectorAssembler, StringIndexer
     from pyspark.ml.classification import LogisticRegression, RandomForestClassifier, GBTClassifier
     from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
+    spark, delta_enabled = get_spark_session("pareto_training", s, log=log)
     try:
-        from delta import configure_spark_with_delta_pip  # type: ignore
-    except Exception:
-        configure_spark_with_delta_pip = None
-    builder = (
-        SparkSession.builder.appName("pareto_training")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .config("spark.sql.warehouse.dir", str((s.project_root / "warehouse").resolve()))
-    )
-    spark = configure_spark_with_delta_pip(builder).getOrCreate() if configure_spark_with_delta_pip else builder.getOrCreate()
+        gold_delta = Path(s.gold_dir) / "features"
+        if not gold_delta.exists():
+            raise FileNotFoundError(f"Gold features not found: {gold_delta}")
 
-    gold_delta = Path(s.gold_dir) / "features"
-    if not gold_delta.exists():
-        raise FileNotFoundError(f"Gold delta not found: {gold_delta}")
+        df = None
+        formats = ["delta", "parquet"] if delta_enabled else ["parquet", "delta"]
+        for fmt in formats:
+            try:
+                df = spark.read.format(fmt).load(str(gold_delta)).fillna(0)
+                break
+            except Exception:
+                continue
+        if df is None:
+            raise RuntimeError(f"unable_to_read_gold_features={gold_delta}")
 
-    df = spark.read.format("delta").load(str(gold_delta)).fillna(0)
-    feat_cols = ["engagement_24h", "uniq_users_est"]
-    si = StringIndexer(inputCol="label", outputCol="label_idx")
-    va = VectorAssembler(inputCols=feat_cols, outputCol="features")
-    evaluator = BinaryClassificationEvaluator(labelCol="label_idx", metricName="areaUnderPR")
+        feat_cols = ["engagement_24h", "uniq_users_est"]
+        si = StringIndexer(inputCol="label", outputCol="label_idx")
+        va = VectorAssembler(inputCols=feat_cols, outputCol="features")
+        evaluator = BinaryClassificationEvaluator(labelCol="label_idx", metricName="areaUnderPR")
 
-    candidates = [
-        ("lr", LogisticRegression(labelCol="label_idx", maxIter=50)),
-        ("rf", RandomForestClassifier(labelCol="label_idx", numTrees=200, maxDepth=10)),
-        ("gbt", GBTClassifier(labelCol="label_idx", maxIter=80, maxDepth=6)),
-    ]
+        candidates = [
+            ("lr", LogisticRegression(labelCol="label_idx", maxIter=50)),
+            ("rf", RandomForestClassifier(labelCol="label_idx", numTrees=200, maxDepth=10)),
+            ("gbt", GBTClassifier(labelCol="label_idx", maxIter=80, maxDepth=6)),
+        ]
 
-    use_mlflow = False
-    if params.use_mlflow:
-        try:
-            import mlflow  # type: ignore
-
-            mlroot = Path(s.artifact_dir) / "mlruns"
-            mlroot.mkdir(parents=True, exist_ok=True)
-            mlflow.set_tracking_uri(f"file://{mlroot}")
-            mlflow.set_experiment("train_pareto")
-            use_mlflow = True
-        except Exception as e:
-            log.info(f"mlflow_disabled_reason={e}")
-
-    results: List[Dict] = []
-    for name, clf in candidates:
-        start = time.time()
-        pipe = Pipeline(stages=[si, va, clf]).fit(df)
-        fit_ms = (time.time() - start) * 1000
-        t0 = time.time()
-        pred = pipe.transform(df)
-        latency_ms = (time.time() - t0) * 1000
-        aucpr = float(evaluator.evaluate(pred))
-        feat_count = len(feat_cols)
-        res = {"name": name, "aucpr": aucpr, "latency_ms": latency_ms, "feat_count": feat_count, "fit_ms": fit_ms}
-        results.append(res)
-
-        if use_mlflow:
+        use_mlflow = False
+        if params.use_mlflow:
             try:
                 import mlflow  # type: ignore
 
-                with mlflow.start_run(run_name=name):
-                    mlflow.log_params({"model": name, "feat_count": feat_count})
-                    mlflow.log_metrics({"aucpr": aucpr, "latency_ms": latency_ms, "fit_ms": fit_ms})
+                mlroot = Path(s.artifact_dir) / "mlruns"
+                mlroot.mkdir(parents=True, exist_ok=True)
+                mlflow.set_tracking_uri(f"file://{mlroot}")
+                mlflow.set_experiment("train_pareto")
+                use_mlflow = True
             except Exception as e:
-                log.info(f"mlflow_log_failed={e}")
+                log.info(f"mlflow_disabled_reason={e}")
 
-    pareto = _pareto_front(results)
-    art = _save_pareto_artifact(results, pareto)
-    log.info(f"pareto_artifact={art}")
-    return {"artifact": str(art), "results": str(len(results)), "front": str(len(pareto))}
+        results: List[Dict] = []
+        for name, clf in candidates:
+            start = time.time()
+            pipe = Pipeline(stages=[si, va, clf]).fit(df)
+            fit_ms = (time.time() - start) * 1000
+            t0 = time.time()
+            pred = pipe.transform(df)
+            latency_ms = (time.time() - t0) * 1000
+            aucpr = float(evaluator.evaluate(pred))
+            feat_count = len(feat_cols)
+            res = {"name": name, "aucpr": aucpr, "latency_ms": latency_ms, "feat_count": feat_count, "fit_ms": fit_ms}
+            results.append(res)
+
+            if use_mlflow:
+                try:
+                    import mlflow  # type: ignore
+
+                    with mlflow.start_run(run_name=name):
+                        mlflow.log_params({"model": name, "feat_count": feat_count})
+                        mlflow.log_metrics({"aucpr": aucpr, "latency_ms": latency_ms, "fit_ms": fit_ms})
+                except Exception as e:
+                    log.info(f"mlflow_log_failed={e}")
+
+        pareto = _pareto_front(results)
+        art = _save_pareto_artifact(results, pareto)
+        log.info(f"pareto_artifact={art}")
+        return {"artifact": str(art), "results": str(len(results)), "front": str(len(pareto))}
+    finally:
+        try:
+            spark.stop()
+        except Exception:
+            pass
 
 
 def _pr_auc(y_true: List[int], scores: List[float]) -> float:

@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional
 
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
+from ..core.spark_env import get_spark_session
 
 
 @dataclass
@@ -109,43 +110,39 @@ def run_silver_stream(params: Optional[SilverParams] = None, fallback_local: Opt
 
     # Try Spark streaming
     try:
-        from pyspark.sql import SparkSession
         from pyspark.sql.functions import col, from_unixtime, window
+
+        spark = None
         try:
-            from delta import configure_spark_with_delta_pip  # type: ignore
-        except Exception:
-            configure_spark_with_delta_pip = None
+            spark, delta_enabled = get_spark_session("silver_stream", s, log=log)
 
-        builder = (
-            SparkSession.builder.appName("silver_stream")
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-            .config("spark.sql.warehouse.dir", str((s.project_root / "warehouse").resolve()))
-        )
-        spark = configure_spark_with_delta_pip(builder).getOrCreate() if configure_spark_with_delta_pip else builder.getOrCreate()
-
-        schema = "post_id string, text string, lang string, ts long, author_id string, video_id string, source string"
-        raw = spark.readStream.format("json").schema(schema).load(str(s.landing_dir))
-        clean = (
-            raw.filter((col("post_id").isNotNull()) & (col("lang") == "en"))
-               .withColumn("event_time", from_unixtime(col("ts")/1000).cast("timestamp"))
-               .withWatermark("event_time", params.watermark)
-               .dropDuplicates(["post_id"])
-        )
-        win = clean.groupBy(window(col("event_time"), params.window_size, params.window_slide), col("video_id")).count()
-        writer = (
-            win.writeStream
-               .format("delta")
-               .option("checkpointLocation", str(Path(s.checkpoint_dir)/"silver"))
-               .outputMode("append")
-        )
-        if params.once:
-            writer = writer.trigger(once=True)
-        q = writer.start(str(Path(s.silver_dir)/"social_metrics"))
-        if params.once:
+            schema = "post_id string, text string, lang string, ts long, author_id string, video_id string, source string"
+            raw = spark.readStream.format("json").schema(schema).load(str(s.landing_dir))
+            clean = (
+                raw.filter((col("post_id").isNotNull()) & (col("lang") == "en"))
+                   .withColumn("event_time", from_unixtime(col("ts")/1000).cast("timestamp"))
+                   .withWatermark("event_time", params.watermark)
+                   .dropDuplicates(["post_id"])
+            )
+            win = clean.groupBy(window(col("event_time"), params.window_size, params.window_slide), col("video_id")).count()
+            writer = (
+                win.writeStream
+                   .format("delta" if delta_enabled else "parquet")
+                   .option("checkpointLocation", str(Path(s.checkpoint_dir)/"silver"))
+                   .outputMode("append")
+            )
+            if params.once:
+                writer = writer.trigger(once=True)
+            q = writer.start(str(Path(s.silver_dir)/"social_metrics"))
             q.awaitTermination()
-        else:
-            q.awaitTermination()
+            if q.isActive:
+                q.stop()
+        finally:
+            if spark is not None:
+                try:
+                    spark.stop()
+                except Exception:
+                    pass
     except Exception as e:
         log.info(f"silver_stream_fallback_reason={e}")
         n = _fallback_once(params)
