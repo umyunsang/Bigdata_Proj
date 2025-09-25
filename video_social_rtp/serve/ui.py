@@ -7,7 +7,7 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 
-from ..core.config import load_settings
+from video_social_rtp.core.config import load_settings
 
 
 def _load_gold_features_csv() -> Optional[pd.DataFrame]:
