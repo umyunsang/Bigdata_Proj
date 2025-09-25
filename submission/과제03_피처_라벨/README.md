@@ -1,21 +1,11 @@
-## 과제03 — 피처 엔지니어링 및 라벨링(Gold)
+# Assignment 03 · Feature Engineering & Labeling (Gold Layer)
 
-프로젝트 CLI(추천)
-- Gold 피처/라벨: `python -m video_social_rtp.cli gold --top-pct 0.9`
-- (샌드박스/Spark 불가 시) `python -m video_social_rtp.cli gold --fallback-local`
+This folder captures the gold-layer transformation where engagement features are computed and percentile-based labels are assigned from the silver metrics.
 
-입력 경로
-- Silver 메트릭: `project/data/silver/social_metrics/` (Delta 또는 fallback CSV)
-
-출력 산출물
-- Gold 피처: `project/data/gold/features` (Delta; 폴백 시 `project/data/gold/features.csv`)
-- 컷오프 아티팩트: `project/artifacts/gold_cutoff.json` (percentile, cutoff 기록)
-
-권장 스크린샷 체크리스트
-- gold 실행 콘솔 로그
-- Gold 피처 테이블/CSV 앞부분 미리보기
-- `gold_cutoff.json` 내용(컷오프 값 확인)
-
-스니펫 경로(참고)
-- `python video-social-rtp-snippets/jobs/30_gold_features.py`
-
+## Screenshots
+- `screenshots/Gold 실행 결과.png`: CLI trace of the gold feature job, including summaries of rows processed and fallback notices when applicable.
+- `screenshots/Gold 데이터 디렉토리.png`: Directory listing that verifies the written Delta/Pandas outputs for gold features.
+- `screenshots/Delta Lake 로그.png`: Delta Lake log details for the gold write, showing versioned commits and schema metadata.
+- `screenshots/피처 데이터 샘플.png`: Snapshot of the engineered features (e.g., engagement_24h, uniq_users_est) generated from aggregated counts.
+- `screenshots/라벨링 결과 통계.png`: Analytical view summarizing label distribution after applying the CDF cut-off (top percentile threshold).
+- `screenshots/CDF 컷오프 아티팩트.png`: Artifact preview documenting the persisted percentile cut-off (`gold_cutoff.json`) for reproducibility across downstream steps.
