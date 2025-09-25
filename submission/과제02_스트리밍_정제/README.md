@@ -1,19 +1,10 @@
-## 과제02 — 스트리밍 구조화/정제(Silver)
+# Assignment 02 · Streaming Refinement (Silver Layer)
 
-프로젝트 CLI(추천)
-- 스트리밍 집계: `python -m video_social_rtp.cli silver`
-- (샌드박스/로컬 Spark 불가 시) `python -m video_social_rtp.cli silver --fallback-local`
-- 파라미터: `--watermark "10 minutes" --window "1 hour" --slide "5 minutes"`
+Screenshots in this directory summarize the Structured Streaming job that aggregates landing events into the silver layer with watermarking and Delta persistence.
 
-스니펫 경로(참고)
-- `python video-social-rtp-snippets/jobs/20_silver_stream.py`
-
-산출물 경로
-- Silver 메트릭: `project/data/silver/social_metrics/`
-- 체크포인트: `project/chk/silver/`
-
-권장 스크린샷 체크리스트
-- 스트리밍 시작 콘솔 로그(또는 fallback 실행 로그)
-- social_metrics 생성 파일(미리보기 포함)
-- 체크포인트 폴더 생성 확인
-
+## Screenshots
+- `screenshots/Silver 실행 결과.png`: Spark streaming console output showing the silver job startup, micro-batch progress, and trigger completion in once-mode.
+- `screenshots/워터마크 설정 확인.png`: Code/log snippet validating that event-time watermarking (e.g., `10 minutes`) is active to handle late data.
+- `screenshots/처리된 데이터 샘플.png`: Tabular preview of aggregated counts per video ID produced by the streaming window.
+- `screenshots/Silver 데이터 디렉토리.png`: File system view confirming the creation of Delta checkpoint and table directories under the configured silver path.
+- `screenshots/Delta Lake 로그.png`: Delta transaction log excerpt documenting append commits and schema information for the silver table.
