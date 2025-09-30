@@ -116,9 +116,9 @@ python -m video_social_rtp.cli ui --port 8501
 - **Logging**: `video_social_rtp/core/logging.py`에서 JSON 포맷 로그를 남기고, `project/logs/`에서 확인할 수 있습니다.
 - **Artifacts**: Gold 컷오프(`project/artifacts/gold_cutoff.json`), Pareto 결과(`project/artifacts/pareto.json`), MLflow 런 등이 자동 저장됩니다.
 
-### 자동화 시스템 (85일간 데이터 축적)
-- **매일 자동 실행**: cron 작업을 통해 매일 오전 9시에 자동으로 YouTube API 데이터 수집 및 Spark 처리
-- **85일간 지속**: 마감일(2025-12-19)까지 매일 자동으로 K-POP 관련 데이터 축적
+### 자동화 시스템 (30일간 데이터 축적)
+- **매일 자동 실행**: cron 작업을 통해 매일 오전 9시, 오후 3시에 자동으로 YouTube API 데이터 수집 및 Spark 처리
+- **30일간 지속**: 2025-09-30부터 30일간 매일 자동으로 K-POP 관련 데이터 축적
 - **백그라운드 실행**: SSH 연결이 끊어져도 nohup을 통해 백그라운드에서 계속 실행
 - **주간 분석**: 매주 일요일 오전 10시에 자동으로 주간 분석 리포트 생성
 - **API 할당량 관리**: YouTube Data API v3 일일 할당량(10,000 units) 내에서 안전하게 운영

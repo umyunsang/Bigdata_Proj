@@ -47,6 +47,12 @@ def get_spark_session(app_name: str, settings: Settings, log=None) -> Tuple["Spa
         builder = builder.config("spark.sql.shuffle.partitions", os.environ.get("SPARK_SQL_SHUFFLE_PARTITIONS", "4"))
         builder = builder.config("spark.ui.enabled", "false")
         builder = builder.config("spark.sql.session.timeZone", os.environ.get("SPARK_SQL_TIMEZONE", "UTC"))
+        # 저장 공간 최적화를 위한 압축 설정
+        builder = builder.config("spark.sql.adaptive.enabled", "true")
+        builder = builder.config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        builder = builder.config("spark.sql.parquet.compression.codec", "snappy")
+        builder = builder.config("spark.sql.parquet.enableVectorizedReader", "true")
+        builder = builder.config("spark.sql.parquet.mergeSchema", "false")
         if enable_delta:
             builder = builder.config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
             builder = builder.config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # 매일 자동 데이터 축적 및 분석 스크립트
-# 마감일: 2025-12-19(금) 23:59, Asia/Seoul
+# 30일간 데이터 축적: 2025-09-30 ~ 2025-10-30
 # SSH 연결이 끊어져도 백그라운드에서 계속 실행되도록 nohup 사용
 
 # 로그 설정
@@ -32,8 +32,8 @@ export PIPELINE_SKIP_IF_EXISTS=false
 
 # YouTube API 일일 할당량 고려 (10,000 units/day)
 # 각 검색당 약 100 units 소모, 하루 최대 100회 검색 가능
-# 안전하게 하루 50회 검색으로 제한
-MAX_DAILY_SEARCHES=50
+# 빅데이터 규모 확보를 위해 하루 80회 검색으로 확장
+MAX_DAILY_SEARCHES=80
 
 # 검색어 목록 (K-POP 관련 다양한 키워드)
 SEARCH_QUERIES=(
@@ -89,9 +89,9 @@ SEARCH_QUERIES=(
     "K-pop challenge"
 )
 
-# 랜덤 검색어 선택 (하루 5개)
+# 랜덤 검색어 선택 (저장 공간 고려하여 하루 10개)
 SELECTED_QUERIES=()
-for i in {1..5}; do
+for i in {1..10}; do
     RANDOM_INDEX=$((RANDOM % ${#SEARCH_QUERIES[@]}))
     SELECTED_QUERIES+=("${SEARCH_QUERIES[$RANDOM_INDEX]}")
 done
@@ -104,7 +104,7 @@ for query in "${SELECTED_QUERIES[@]}"; do
     
     # 파이프라인 실행
     export PIPELINE_QUERY="$query"
-    export PIPELINE_MAX_ITEMS=10  # 각 검색당 10개 비디오 (API 할당량 절약)
+    export PIPELINE_MAX_ITEMS=50  # 각 검색당 50개 비디오 (저장 공간 고려)
     export PIPELINE_REGION_CODE="KR"
     export PIPELINE_RELEVANCE_LANGUAGE="ko"
     
