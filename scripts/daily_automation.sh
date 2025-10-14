@@ -29,6 +29,7 @@ export PIPELINE_GOLD_FALLBACK_LOCAL=false
 export PIPELINE_TRAIN_FALLBACK_LOCAL=false
 export PIPELINE_ENABLE_MLFLOW=0
 export PIPELINE_SKIP_IF_EXISTS=false
+export PIPELINE_FORCE_MOCK=false
 
 # YouTube API 일일 할당량 고려 (10,000 units/day)
 # 각 검색당 약 100 units 소모, 하루 최대 100회 검색 가능

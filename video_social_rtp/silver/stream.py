@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+
+from pyspark.sql import Row
 
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
@@ -87,13 +90,102 @@ def _fallback_once(params: SilverParams) -> int:
     # write a compact CSV to social_metrics (fallback format)
     out_file = out_dir / f"metrics_fallback_{int(time.time())}.csv"
     with out_file.open("w", encoding="utf-8") as f:
-        f.write("video_id,count,window_end_ts\n")
+        f.write("video_id,window_start_ts,window_end_ts,count\n")
+        win_minutes = _parse_minutes(params.window_size)
+        win_ms = win_minutes * 60 * 1000
         for vid, c in counts.items():
-            f.write(f"{vid},{c},{max_ts}\n")
+            f.write(f"{vid},{max_ts - win_ms},{max_ts},{c}\n")
 
     # naive checkpoint marker
     (chk_dir / "_fallback_marker").write_text(str(int(time.time())), encoding="utf-8")
     return len(counts)
+
+
+def _run_silver_rdd(params: SilverParams, log) -> int:
+    s = load_settings()
+    ensure_dirs(s)
+
+    spark = None
+    try:
+        spark, delta_enabled = get_spark_session("silver_batch", s, log=log)
+        sc = spark.sparkContext
+        storage_format = "delta" if delta_enabled else "parquet"
+
+        landing_files = list(Path(s.landing_dir).glob("*.json"))
+        if not landing_files:
+            out_dir = Path(s.silver_dir) / "social_metrics"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if not any(out_dir.iterdir()):
+                (out_dir / "_EMPTY").touch()
+            return 0
+
+        landing_pattern = str(Path(s.landing_dir) / "*.json")
+        raw_rdd = sc.textFile(landing_pattern)
+
+        def parse_line(line: str) -> Optional[Dict[str, int]]:
+            try:
+                item = json.loads(line)
+            except Exception:
+                return None
+            post_id = item.get("post_id")
+            video_id = item.get("video_id")
+            lang = item.get("lang")
+            ts = item.get("ts")
+            if lang != "en" or not post_id or not video_id or ts is None:
+                return None
+            try:
+                ts_val = int(ts)
+            except Exception:
+                return None
+            return {
+                "post_id": str(post_id),
+                "video_id": str(video_id),
+                "ts": ts_val,
+            }
+
+        events = raw_rdd.map(parse_line).filter(lambda rec: rec is not None)
+        deduped = events.map(lambda rec: (rec["post_id"], rec)).reduceByKey(lambda a, _: a).values()
+
+        window_minutes = _parse_minutes(params.window_size)
+        slide_minutes = max(1, _parse_minutes(params.window_slide))
+        window_ms = window_minutes * 60 * 1000
+        slide_ms = slide_minutes * 60 * 1000
+        window_count = max(1, math.ceil(window_ms / slide_ms))
+
+        def assign_windows(rec: Dict[str, int]):
+            ts = rec["ts"]
+            last_start = (ts // slide_ms) * slide_ms
+            for offset in range(window_count):
+                start = last_start - offset * slide_ms
+                end = start + window_ms
+                if ts < start or ts >= end:
+                    continue
+                yield ((rec["video_id"], start, end), 1)
+
+        pairs = deduped.flatMap(assign_windows)
+        aggregated = pairs.reduceByKey(lambda a, b: a + b)
+
+        if aggregated.isEmpty():
+            out_dir = Path(s.silver_dir) / "social_metrics"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "_EMPTY").touch()
+            return 0
+
+        rows_rdd = aggregated.map(lambda kv: Row(video_id=kv[0][0], window_start_ts=kv[0][1], window_end_ts=kv[0][2], count=kv[1]))
+        df = spark.createDataFrame(rows_rdd)
+
+        out_path = Path(s.silver_dir) / "social_metrics"
+        (df.write.format(storage_format)
+            .mode("overwrite")
+            .save(str(out_path)))
+
+        return int(df.count())
+    finally:
+        if spark is not None:
+            try:
+                spark.stop()
+            except Exception:
+                pass
 
 
 def run_silver_stream(params: Optional[SilverParams] = None, fallback_local: Optional[bool] = None) -> None:
@@ -108,42 +200,10 @@ def run_silver_stream(params: Optional[SilverParams] = None, fallback_local: Opt
         log.info(f"silver_fallback_groups={n}")
         return
 
-    # Try Spark streaming
     try:
-        from pyspark.sql.functions import col, from_unixtime, window
-
-        spark = None
-        try:
-            spark, delta_enabled = get_spark_session("silver_stream", s, log=log)
-
-            schema = "post_id string, text string, lang string, ts long, author_id string, video_id string, source string"
-            raw = spark.readStream.format("json").schema(schema).load(str(s.landing_dir))
-            clean = (
-                raw.filter((col("post_id").isNotNull()) & (col("lang") == "en"))
-                   .withColumn("event_time", from_unixtime(col("ts")/1000).cast("timestamp"))
-                   .withWatermark("event_time", params.watermark)
-                   .dropDuplicates(["post_id"])
-            )
-            win = clean.groupBy(window(col("event_time"), params.window_size, params.window_slide), col("video_id")).count()
-            writer = (
-                win.writeStream
-                   .format("delta" if delta_enabled else "parquet")
-                   .option("checkpointLocation", str(Path(s.checkpoint_dir)/"silver"))
-                   .outputMode("append")
-            )
-            if params.once:
-                writer = writer.trigger(once=True)
-            q = writer.start(str(Path(s.silver_dir)/"social_metrics"))
-            q.awaitTermination()
-            if q.isActive:
-                q.stop()
-        finally:
-            if spark is not None:
-                try:
-                    spark.stop()
-                except Exception:
-                    pass
+        n = _run_silver_rdd(params, log)
+        log.info(f"silver_groups={n}")
     except Exception as e:
-        log.info(f"silver_stream_fallback_reason={e}")
+        log.info(f"silver_rdd_fallback_reason={e}")
         n = _fallback_once(params)
         log.info(f"silver_fallback_groups={n}")

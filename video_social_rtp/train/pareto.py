@@ -5,7 +5,12 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+
+from pyspark.mllib.classification import LogisticRegressionWithLBFGS
+from pyspark.mllib.linalg import Vectors
+from pyspark.mllib.regression import LabeledPoint
+from pyspark.mllib.tree import GradientBoostedTrees, RandomForest
 
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
@@ -45,11 +50,6 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
     ensure_dirs(s)
     log = setup_logging("train")
 
-    from pyspark.ml import Pipeline
-    from pyspark.ml.feature import VectorAssembler, StringIndexer
-    from pyspark.ml.classification import LogisticRegression, RandomForestClassifier, GBTClassifier
-    from pyspark.ml.evaluation import BinaryClassificationEvaluator
-
     spark, delta_enabled = get_spark_session("pareto_training", s, log=log)
     try:
         gold_delta = Path(s.gold_dir) / "features"
@@ -60,22 +60,69 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
         formats = ["delta", "parquet"] if delta_enabled else ["parquet", "delta"]
         for fmt in formats:
             try:
-                df = spark.read.format(fmt).load(str(gold_delta)).fillna(0)
+                df = spark.read.format(fmt).load(str(gold_delta)).select("label", "engagement_24h", "uniq_users_est").fillna(0)
                 break
             except Exception:
                 continue
         if df is None:
             raise RuntimeError(f"unable_to_read_gold_features={gold_delta}")
 
-        feat_cols = ["engagement_24h", "uniq_users_est"]
-        si = StringIndexer(inputCol="label", outputCol="label_idx")
-        va = VectorAssembler(inputCols=feat_cols, outputCol="features")
-        evaluator = BinaryClassificationEvaluator(labelCol="label_idx", metricName="areaUnderPR")
+        lp_rdd = df.rdd.map(
+            lambda row: LabeledPoint(float(row.label), Vectors.dense([float(row.engagement_24h), float(row.uniq_users_est)]))
+        )
+        if lp_rdd.isEmpty():
+            raise RuntimeError("Gold features RDD is empty")
 
-        candidates = [
-            ("lr", LogisticRegression(labelCol="label_idx", maxIter=50)),
-            ("rf", RandomForestClassifier(labelCol="label_idx", numTrees=200, maxDepth=10)),
-            ("gbt", GBTClassifier(labelCol="label_idx", maxIter=80, maxDepth=6)),
+        lp_rdd = lp_rdd.cache()
+        class_count = lp_rdd.map(lambda lp: int(lp.label)).distinct().count()
+        if class_count < 2:
+            raise RuntimeError(
+                "Need at least two classes for training; collect more data or adjust Gold percentile to generate label variety."
+            )
+
+        feat_cols = ["engagement_24h", "uniq_users_est"]
+
+        def train_lr(data):
+            model = LogisticRegressionWithLBFGS.train(data, iterations=50, numClasses=2)
+            model.clearThreshold()
+            return model, model.predict
+
+        def train_rf(data):
+            model = RandomForest.trainClassifier(
+                data,
+                numClasses=2,
+                categoricalFeaturesInfo={},
+                numTrees=200,
+                maxDepth=10,
+                seed=42,
+            )
+
+            def score(features):
+                if not model.trees:
+                    return 0.0
+                votes = sum(tree.predict(features) for tree in model.trees)
+                return float(votes) / float(len(model.trees))
+
+            return model, score
+
+        def train_gbt(data):
+            model = GradientBoostedTrees.trainClassifier(
+                data,
+                categoricalFeaturesInfo={},
+                numIterations=80,
+                learningRate=0.1,
+                maxDepth=6,
+            )
+
+            def score(features):
+                return float(model.predict(features))
+
+            return model, score
+
+        candidates: List[Tuple[str, Callable]] = [
+            ("lr", train_lr),
+            ("rf", train_rf),
+            ("gbt", train_gbt),
         ]
 
         use_mlflow = False
@@ -92,14 +139,17 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
                 log.info(f"mlflow_disabled_reason={e}")
 
         results: List[Dict] = []
-        for name, clf in candidates:
+        for name, trainer in candidates:
             start = time.time()
-            pipe = Pipeline(stages=[si, va, clf]).fit(df)
+            model, scorer = trainer(lp_rdd)
             fit_ms = (time.time() - start) * 1000
             t0 = time.time()
-            pred = pipe.transform(df)
+            scores = lp_rdd.map(lambda lp: (int(lp.label), float(scorer(lp.features))))
+            score_list = scores.collect()
             latency_ms = (time.time() - t0) * 1000
-            aucpr = float(evaluator.evaluate(pred))
+            y = [lbl for lbl, _ in score_list]
+            y_scores = [sc for _, sc in score_list]
+            aucpr = _pr_auc(y, y_scores)
             feat_count = len(feat_cols)
             res = {"name": name, "aucpr": aucpr, "latency_ms": latency_ms, "feat_count": feat_count, "fit_ms": fit_ms}
             results.append(res)

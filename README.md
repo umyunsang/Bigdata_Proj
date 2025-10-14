@@ -6,6 +6,7 @@
 
 ## Table of Contents
 - [Repository at a Glance](#repository-at-a-glance)
+- [What We Analyze & Predict](#what-we-analyze--predict)
 - [Spotlight: Snippets & Labs](#spotlight-snippets--labs)
 - [Pipeline Architecture](#pipeline-architecture)
 - [Project Flow · 00 → 05](#project-flow--00--05)
@@ -20,6 +21,54 @@
 - **Fallback-friendly design** – 모든 단계는 Spark 없는 로컬 환경에서도 Pandas/CSV 기반으로 동작합니다.
 - **Artifacts-first workflow** – `project/` 폴더 하위에 Delta Lake 테이블, 체크포인트, MLflow 로그, UI용 CSV를 남깁니다.
 - **Dual-language documentation** – `docs/`에 과제 00~05 단계별 한글 설명과 Mermaid 아키텍처가 정리되어 있습니다.
+
+## What We Analyze & Predict
+
+### 🎯 목적: K-POP 비디오의 바이럴 가능성 예측
+
+이 프로젝트는 **YouTube에서 실시간으로 수집되는 K-POP 비디오 데이터**를 분석하여 **어떤 비디오가 바이럴될지 예측**합니다.
+
+#### 📥 수집 데이터 (YouTube Data API v3)
+- **비디오 메타데이터**: 제목, ID, 채널 정보
+- **검색어**: K-POP, BTS, BLACKPINK, NewJeans, aespa 등 50+ 키워드
+- **지역 설정**: 한국(KR), 한국어(ko)
+- **수집 빈도**: 매일 2회 (오전 9시, 오후 3시)
+
+#### 🔄 실시간 스트리밍 집계 (Silver)
+- **Sliding Window**: 1시간 윈도우, 5분 슬라이드
+- **Watermark**: 10분 지연 이벤트 허용
+- **집계 지표**: video_id별 시간대별 등장 횟수
+
+#### ⚙️ 피처 엔지니어링 (Gold)
+1. **engagement_24h**: 24시간 동안의 총 참여도 (높을수록 인기)
+2. **uniq_users_est**: HyperLogLog으로 추정한 고유 사용자 수
+3. **label**: CDF 기반 이진 분류
+   - **label=1**: 상위 10% 바이럴 비디오 🔥
+   - **label=0**: 나머지 90% 일반 비디오
+
+#### 🤖 머신러닝 모델 (Train)
+- **예측 문제**: "이 K-POP 비디오가 바이럴될까?" (이진 분류)
+- **입력 피처**: engagement_24h, uniq_users_est
+- **사용 모델**: Logistic Regression, Random Forest, Gradient Boosting Tree
+- **모델 선택**: Pareto Front로 성능·속도·복잡도 최적화
+
+#### 🔮 예측 결과 예시
+| Video | Engagement | Unique Users | 예측 | 의미 |
+|-------|------------|--------------|------|------|
+| IVE 'XOXZ' MV | 150.0 | 120.0 | **1** | 바이럴 가능성 높음 🔥 |
+| BTS Quiz | 8.0 | 5.0 | **0** | 일반 성과 예상 |
+| BLACKPINK 'JUMP' | 200.0 | 180.0 | **1** | 바이럴 가능성 높음 🔥 |
+
+#### 📊 Streamlit UI 기능
+- **Bloom Filter**: 비디오 최근 존재 여부 체크
+- **CDF/PDF 차트**: 전체 분포와 cutoff 시각화
+- **예측 결과**: 바이럴 가능성 표시
+- **Top-K 랭킹**: 최근 인기 비디오 목록
+
+### 💡 활용 시나리오
+- K-POP 마케터: 어떤 컨텐츠가 바이럴될지 조기 예측
+- 기획사: 프로모션 전략 수립을 위한 데이터 기반 의사결정
+- 분석가: K-POP 트렌드 실시간 모니터링
 
 ## Spotlight: Snippets & Labs
 ### `video-social-rtp-snippets/`

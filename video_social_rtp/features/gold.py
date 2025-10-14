@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
+from pyspark.sql import Row
+
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
 from ..core.spark_env import get_spark_session
@@ -34,46 +36,116 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     # Try Spark first unless forced fallback
     if not use_fallback:
         try:
-            from pyspark.sql.functions import approx_count_distinct as acd, col
-
             spark = None
             try:
                 spark, delta_enabled = get_spark_session("gold_features", s, log=log)
+                sc = spark.sparkContext
 
                 silver_path = Path(s.silver_dir) / "social_metrics"
-                metrics = None
+                metrics_df = None
                 formats = ["delta", "parquet"] if delta_enabled else ["parquet", "delta"]
                 for fmt in formats:
                     try:
-                        metrics = spark.read.format(fmt).load(str(silver_path))
+                        metrics_df = spark.read.format(fmt).load(str(silver_path)).select("video_id", "count")
                         break
                     except Exception:
                         continue
-                if metrics is None:
+                if metrics_df is None:
                     raise FileNotFoundError(f"silver_metrics_not_found={silver_path}")
 
-                eng = metrics.select("video_id", "count").groupBy("video_id").sum("count").withColumnRenamed("sum(count)", "engagement_24h")
-                uniq_est = metrics.groupBy("video_id").agg(acd("video_id").alias("uniq_users_est"))
-                joined = eng.join(uniq_est, "video_id", "left")
-                if not joined.take(1):
+                metrics_rdd = (
+                    metrics_df.rdd
+                    .map(lambda row: row.asDict())
+                    .filter(lambda rec: rec.get("video_id") is not None)
+                    .map(
+                        lambda rec: (
+                            str(rec["video_id"]),
+                            float(rec["count"]) if rec.get("count") is not None else 0.0,
+                        )
+                    )
+                )
+                if metrics_rdd.isEmpty():
                     out = Path(s.gold_dir) / "features"
-                    (joined.limit(0).write.format("delta" if delta_enabled else "parquet").mode("overwrite").save(str(out)))
+                    empty_df = spark.createDataFrame(sc.emptyRDD(), schema="video_id string, engagement_24h double, uniq_users_est double, label int")
+                    (empty_df.write.format("delta" if delta_enabled else "parquet").mode("overwrite").save(str(out)))
                     art = _write_artifact(0.0, params.top_pct)
                     log.info(f"gold_delta_empty={out}")
                     return {"path": str(out), "cutoff": "0.0", "artifact": str(art)}
 
-                try:
-                    cut_list = joined.approxQuantile("engagement_24h", [params.top_pct], 0.001)
-                    cut = float(cut_list[0]) if cut_list else 0.0
-                except Exception:
-                    cut = 0.0
-                labeled = joined.withColumn("label", (col("engagement_24h") >= cut).cast("int"))
+                engagement_rdd = metrics_rdd.reduceByKey(lambda a, b: a + b)
+                uniq_est_rdd = metrics_rdd.map(lambda kv: (kv[0], 1.0)).reduceByKey(lambda a, b: a + b)
+                joined_rdd = engagement_rdd.leftOuterJoin(uniq_est_rdd).map(lambda kv: (kv[0], float(kv[1][0]), float(kv[1][1] if kv[1][1] is not None else kv[1][0])))
 
+                joined_list = joined_rdd.collect()
+                if not joined_list:
+                    out = Path(s.gold_dir) / "features"
+                    empty_df = spark.createDataFrame(sc.emptyRDD(), schema="video_id string, engagement_24h double, uniq_users_est double, label int")
+                    (empty_df.write.format("delta" if delta_enabled else "parquet").mode("overwrite").save(str(out)))
+                    art = _write_artifact(0.0, params.top_pct)
+                    log.info(f"gold_delta_empty={out}")
+                    return {"path": str(out), "cutoff": "0.0", "artifact": str(art)}
+
+                engagements = [val[1] for val in joined_list]
+                positive_ids: set[str] = set()
+                all_equal = False
+                if not engagements:
+                    cut = 0.0
+                else:
+                    sorted_vals = sorted(engagements)
+                    unique_vals = sorted(set(sorted_vals))
+                    all_equal = len(unique_vals) == 1
+                    if all_equal:
+                        # 모든 지표가 동일하면 값 기준 분류가 불가능하므로 상위 비율만큼 label=1로 지정
+                        positives = max(1, int(round(len(sorted_vals) * (1 - params.top_pct))))
+                        positives = min(len(sorted_vals), positives)
+                        ranked = sorted(joined_list, key=lambda t: (t[1], t[0]), reverse=True)
+                        positive_ids = {vid for vid, _, _ in ranked[:positives]}
+                        cut = float(unique_vals[0])
+                    elif params.top_pct <= 0:
+                        cut = float(sorted_vals[0])
+                    elif params.top_pct >= 1:
+                        cut = float(sorted_vals[-1])
+                    else:
+                        idx = int(round((len(sorted_vals) - 1) * params.top_pct))
+                        idx = max(0, min(len(sorted_vals) - 1, idx))
+                        cut = float(sorted_vals[idx])
+
+                    if not all_equal:
+                        positive_ids = {vid for vid, eng, _ in joined_list if float(eng) >= cut}
+
+                labeled_rows = []
+                for vid, eng, uniq in joined_list:
+                    uniq_val = float(uniq if uniq is not None else eng)
+                    label = 1 if vid in positive_ids else 0
+                    labeled_rows.append(
+                        Row(
+                            video_id=vid,
+                            engagement_24h=float(eng),
+                            uniq_users_est=uniq_val,
+                            label=label,
+                        )
+                    )
+
+                labeled_df = spark.createDataFrame(labeled_rows)
                 out = Path(s.gold_dir) / "features"
-                (labeled.write.format("delta" if delta_enabled else "parquet").mode("overwrite").save(str(out)))
+                writer = labeled_df.coalesce(1).write.format("delta" if delta_enabled else "parquet")
+                writer.mode("overwrite").save(str(out))
+
+                # CSV 스냅샷도 함께 저장하여 fallback/외부 분석에서 활용
+                csv_path = Path(s.gold_dir) / "features.csv"
+                try:
+                    labeled_df.toPandas().to_csv(csv_path, index=False)
+                except Exception as exc:
+                    log.info(f"gold_csv_write_failed={exc}")
+
                 art = _write_artifact(float(cut), params.top_pct)
                 log.info(f"gold_delta_written={out}")
-                return {"path": str(out), "cutoff": str(cut), "artifact": str(art)}
+                return {
+                    "path": str(out),
+                    "cutoff": str(cut),
+                    "artifact": str(art),
+                    "csv": str(csv_path),
+                }
             finally:
                 if spark is not None:
                     try:
