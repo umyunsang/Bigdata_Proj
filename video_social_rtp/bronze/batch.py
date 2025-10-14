@@ -10,6 +10,7 @@ from pyspark.sql import Row
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
 from ..core.spark_env import get_spark_session
+from ..core.artists import extract_artist
 
 
 def run_bronze_batch(fallback_local: bool | None = None) -> int:
@@ -46,6 +47,9 @@ def run_bronze_batch(fallback_local: bool | None = None) -> int:
                 video_id = item.get("video_id")
                 if not post_id or not video_id:
                     return None
+                text = item.get("text") or item.get("title")
+                channel = item.get("author_id")
+                artist = extract_artist(text, channel)
                 return Row(
                     post_id=str(post_id),
                     video_id=str(video_id),
@@ -54,6 +58,7 @@ def run_bronze_batch(fallback_local: bool | None = None) -> int:
                     ts=int(item.get("ts", 0)),
                     ingest_date=ingest_date,
                     source="yt",
+                    artist=artist,
                 )
 
             incoming_rdd = raw_rdd.map(parse_line).filter(lambda r: r is not None)
@@ -79,7 +84,7 @@ def run_bronze_batch(fallback_local: bool | None = None) -> int:
 
             filtered_df = spark.createDataFrame(filtered_rdd)
             (filtered_df.write.format(storage_format).mode("append")
-                .partitionBy("ingest_date", "source")
+                .partitionBy("ingest_date", "artist")
                 .save(str(s.bronze_dir)))
 
             log.info(f"bronze_rows={cnt}")

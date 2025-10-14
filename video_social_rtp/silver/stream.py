@@ -14,6 +14,7 @@ from pyspark.sql import Row
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
 from ..core.spark_env import get_spark_session
+from ..core.artists import extract_artist
 
 
 @dataclass
@@ -77,24 +78,31 @@ def _fallback_once(params: SilverParams) -> int:
     win_minutes = _parse_minutes(params.window_size)
     cutoff = max_ts - win_minutes * 60 * 1000
 
-    # filter by window and count per video_id
-    counts: Dict[str, int] = defaultdict(int)
+    # filter by window and accumulate per artist
+    counts: Dict[str, Dict[str, object]] = defaultdict(lambda: {"count": 0, "videos": set(), "authors": set()})
     for e in events:
         try:
             ts = int(e.get("ts", 0))
             if ts >= cutoff and e.get("video_id"):
-                counts[str(e["video_id"])] += 1
+                artist = extract_artist(e.get("text"), e.get("author_id"))
+                bucket = counts[artist]
+                bucket["count"] = int(bucket["count"]) + 1
+                bucket["videos"].add(str(e["video_id"]))
+                if e.get("author_id"):
+                    bucket["authors"].add(str(e["author_id"]))
         except Exception:
             continue
 
     # write a compact CSV to social_metrics (fallback format)
     out_file = out_dir / f"metrics_fallback_{int(time.time())}.csv"
     with out_file.open("w", encoding="utf-8") as f:
-        f.write("video_id,window_start_ts,window_end_ts,count\n")
+        f.write("artist,window_start_ts,window_end_ts,engagement_count,unique_videos,unique_authors\n")
         win_minutes = _parse_minutes(params.window_size)
         win_ms = win_minutes * 60 * 1000
-        for vid, c in counts.items():
-            f.write(f"{vid},{max_ts - win_ms},{max_ts},{c}\n")
+        for artist, stats in counts.items():
+            f.write(
+                f"{artist},{max_ts - win_ms},{max_ts},{int(stats['count'])},{len(stats['videos'])},{len(stats['authors'])}\n"
+            )
 
     # naive checkpoint marker
     (chk_dir / "_fallback_marker").write_text(str(int(time.time())), encoding="utf-8")
@@ -122,7 +130,7 @@ def _run_silver_rdd(params: SilverParams, log) -> int:
         landing_pattern = str(Path(s.landing_dir) / "*.json")
         raw_rdd = sc.textFile(landing_pattern)
 
-        def parse_line(line: str) -> Optional[Dict[str, int]]:
+        def parse_line(line: str) -> Optional[Dict[str, object]]:
             try:
                 item = json.loads(line)
             except Exception:
@@ -141,6 +149,8 @@ def _run_silver_rdd(params: SilverParams, log) -> int:
                 "post_id": str(post_id),
                 "video_id": str(video_id),
                 "ts": ts_val,
+                "artist": extract_artist(item.get("text") or item.get("title"), item.get("author_id")),
+                "author_id": str(item.get("author_id", "")) if item.get("author_id") else "",
             }
 
         events = raw_rdd.map(parse_line).filter(lambda rec: rec is not None)
@@ -152,7 +162,7 @@ def _run_silver_rdd(params: SilverParams, log) -> int:
         slide_ms = slide_minutes * 60 * 1000
         window_count = max(1, math.ceil(window_ms / slide_ms))
 
-        def assign_windows(rec: Dict[str, int]):
+        def assign_windows(rec: Dict[str, object]):
             ts = rec["ts"]
             last_start = (ts // slide_ms) * slide_ms
             for offset in range(window_count):
@@ -160,10 +170,25 @@ def _run_silver_rdd(params: SilverParams, log) -> int:
                 end = start + window_ms
                 if ts < start or ts >= end:
                     continue
-                yield ((rec["video_id"], start, end), 1)
+                yield (
+                    (rec["artist"], start, end),
+                    {
+                        "count": 1,
+                        "videos": {rec["video_id"]},
+                        "authors": {rec["author_id"]} if rec.get("author_id") else set(),
+                    },
+                )
 
         pairs = deduped.flatMap(assign_windows)
-        aggregated = pairs.reduceByKey(lambda a, b: a + b)
+        
+        def merge(a: Dict[str, object], b: Dict[str, object]) -> Dict[str, object]:
+            return {
+                "count": int(a["count"]) + int(b["count"]),
+                "videos": set(a["videos"]) | set(b["videos"]),
+                "authors": set(a["authors"]) | set(b["authors"]),
+            }
+
+        aggregated = pairs.reduceByKey(merge)
 
         if aggregated.isEmpty():
             out_dir = Path(s.silver_dir) / "social_metrics"
@@ -171,7 +196,18 @@ def _run_silver_rdd(params: SilverParams, log) -> int:
             (out_dir / "_EMPTY").touch()
             return 0
 
-        rows_rdd = aggregated.map(lambda kv: Row(video_id=kv[0][0], window_start_ts=kv[0][1], window_end_ts=kv[0][2], count=kv[1]))
+        def to_row(kv):
+            (artist, start, end), stats = kv
+            return Row(
+                artist=str(artist),
+                window_start_ts=int(start),
+                window_end_ts=int(end),
+                engagement_count=int(stats["count"]),
+                unique_videos=len(stats["videos"]),
+                unique_authors=len(stats["authors"]),
+            )
+
+        rows_rdd = aggregated.map(to_row)
         df = spark.createDataFrame(rows_rdd)
 
         out_path = Path(s.silver_dir) / "social_metrics"

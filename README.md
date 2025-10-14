@@ -163,7 +163,7 @@ python -m video_social_rtp.cli ui --port 8501
 - **Makefile**: `venv`, `install`, `fetch`, `gold_cli` 등 반복 작업을 단축합니다.
 - **Scripts**: `scripts/scaffold_project.py`는 Step 00을 수행하며 `.env`를 읽어 디렉터리를 생성합니다.
 - **Logging**: `video_social_rtp/core/logging.py`에서 JSON 포맷 로그를 남기고, `project/logs/`에서 확인할 수 있습니다.
-- **Artifacts**: Gold 컷오프(`project/artifacts/gold_cutoff.json`), Pareto 결과(`project/artifacts/pareto.json`), MLflow 런 등이 자동 저장됩니다.
+- **Artifacts**: Gold 티어 요약(`project/artifacts/gold_tiers.json`), Pareto 결과(`project/artifacts/pareto.json`), MLflow 런 등이 자동 저장됩니다.
 
 ### 자동화 시스템 (30일간 데이터 축적)
 - **매일 자동 실행**: cron 작업을 통해 매일 오전 9시, 오후 3시에 자동으로 YouTube API 데이터 수집 및 Spark 처리
