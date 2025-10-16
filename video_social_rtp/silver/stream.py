@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import time
 from collections import defaultdict
@@ -9,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from pyspark.sql import Row
+from pyspark.sql import functions as F, types as T
 
 from ..core.config import load_settings, ensure_dirs
 from ..core.logging import setup_logging
@@ -79,7 +78,11 @@ def _fallback_once(params: SilverParams) -> int:
     cutoff = max_ts - win_minutes * 60 * 1000
 
     # filter by window and accumulate per artist
-    counts: Dict[str, Dict[str, object]] = defaultdict(lambda: {"count": 0, "videos": set(), "authors": set()})
+    counts: Dict[str, Dict[str, object]] = defaultdict(lambda: {
+        "count": 0,
+        "videos": set(),
+        "authors": set(),
+    })
     for e in events:
         try:
             ts = int(e.get("ts", 0))
@@ -109,119 +112,113 @@ def _fallback_once(params: SilverParams) -> int:
     return len(counts)
 
 
-def _run_silver_rdd(params: SilverParams, log) -> int:
+def _run_structured_stream(params: SilverParams, log) -> None:
     s = load_settings()
     ensure_dirs(s)
 
-    spark = None
+    spark, delta_enabled = get_spark_session("silver_stream", s, log=log)
     try:
-        spark, delta_enabled = get_spark_session("silver_batch", s, log=log)
-        sc = spark.sparkContext
-        storage_format = "delta" if delta_enabled else "parquet"
+        schema = T.StructType([
+            T.StructField("post_id", T.StringType(), True),
+            T.StructField("video_id", T.StringType(), True),
+            T.StructField("author_id", T.StringType(), True),
+            T.StructField("text", T.StringType(), True),
+            T.StructField("title", T.StringType(), True),
+            T.StructField("lang", T.StringType(), True),
+            T.StructField("ts", T.LongType(), True),
+            T.StructField("source", T.StringType(), True),
+        ])
 
-        landing_files = list(Path(s.landing_dir).glob("*.json"))
-        if not landing_files:
-            out_dir = Path(s.silver_dir) / "social_metrics"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            if not any(out_dir.iterdir()):
-                (out_dir / "_EMPTY").touch()
-            return 0
+        artist_udf = F.udf(lambda text, channel: extract_artist(text, channel), T.StringType())
 
-        landing_pattern = str(Path(s.landing_dir) / "*.json")
-        raw_rdd = sc.textFile(landing_pattern)
+        raw_stream = (
+            spark.readStream
+            .schema(schema)
+            .option("maxFilesPerTrigger", 1)
+            .json(str(s.landing_dir))
+        )
 
-        def parse_line(line: str) -> Optional[Dict[str, object]]:
-            try:
-                item = json.loads(line)
-            except Exception:
-                return None
-            post_id = item.get("post_id")
-            video_id = item.get("video_id")
-            lang = item.get("lang")
-            ts = item.get("ts")
-            if lang != "en" or not post_id or not video_id or ts is None:
-                return None
-            try:
-                ts_val = int(ts)
-            except Exception:
-                return None
-            return {
-                "post_id": str(post_id),
-                "video_id": str(video_id),
-                "ts": ts_val,
-                "artist": extract_artist(item.get("text") or item.get("title"), item.get("author_id")),
-                "author_id": str(item.get("author_id", "")) if item.get("author_id") else "",
-            }
+        events = (
+            raw_stream
+            .dropna(subset=["post_id", "video_id", "ts"])
+            .filter((F.col("lang").isNull()) | (F.col("lang") == "en"))
+            .withColumn("event_time", F.to_timestamp(F.from_unixtime(F.col("ts") / 1000)))
+            .withColumn("artist", artist_udf(F.col("text"), F.col("author_id")))
+            .dropna(subset=["artist", "event_time"])
+            .withWatermark("event_time", params.watermark)
+            .dropDuplicates(["post_id"])
+        )
 
-        events = raw_rdd.map(parse_line).filter(lambda rec: rec is not None)
-        deduped = events.map(lambda rec: (rec["post_id"], rec)).reduceByKey(lambda a, _: a).values()
-
-        window_minutes = _parse_minutes(params.window_size)
-        slide_minutes = max(1, _parse_minutes(params.window_slide))
-        window_ms = window_minutes * 60 * 1000
-        slide_ms = slide_minutes * 60 * 1000
-        window_count = max(1, math.ceil(window_ms / slide_ms))
-
-        def assign_windows(rec: Dict[str, object]):
-            ts = rec["ts"]
-            last_start = (ts // slide_ms) * slide_ms
-            for offset in range(window_count):
-                start = last_start - offset * slide_ms
-                end = start + window_ms
-                if ts < start or ts >= end:
-                    continue
-                yield (
-                    (rec["artist"], start, end),
-                    {
-                        "count": 1,
-                        "videos": {rec["video_id"]},
-                        "authors": {rec["author_id"]} if rec.get("author_id") else set(),
-                    },
-                )
-
-        pairs = deduped.flatMap(assign_windows)
-        
-        def merge(a: Dict[str, object], b: Dict[str, object]) -> Dict[str, object]:
-            return {
-                "count": int(a["count"]) + int(b["count"]),
-                "videos": set(a["videos"]) | set(b["videos"]),
-                "authors": set(a["authors"]) | set(b["authors"]),
-            }
-
-        aggregated = pairs.reduceByKey(merge)
-
-        if aggregated.isEmpty():
-            out_dir = Path(s.silver_dir) / "social_metrics"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "_EMPTY").touch()
-            return 0
-
-        def to_row(kv):
-            (artist, start, end), stats = kv
-            return Row(
-                artist=str(artist),
-                window_start_ts=int(start),
-                window_end_ts=int(end),
-                engagement_count=int(stats["count"]),
-                unique_videos=len(stats["videos"]),
-                unique_authors=len(stats["authors"]),
+        aggregated = (
+            events.groupBy(
+                F.window("event_time", params.window_size, params.window_slide),
+                F.col("artist"),
             )
+            .agg(
+                F.count("*").alias("engagement_count"),
+                F.approx_count_distinct("video_id").alias("unique_videos"),
+                F.approx_count_distinct("author_id").alias("unique_authors"),
+            )
+        )
 
-        rows_rdd = aggregated.map(to_row)
-        df = spark.createDataFrame(rows_rdd)
+        results = (
+            aggregated
+            .select(
+                F.col("artist"),
+                (F.col("window.start").cast("long") * 1000).alias("window_start_ts"),
+                (F.col("window.end").cast("long") * 1000).alias("window_end_ts"),
+                "engagement_count",
+                "unique_videos",
+                "unique_authors",
+            )
+        )
 
         out_path = Path(s.silver_dir) / "social_metrics"
-        (df.write.format(storage_format)
-            .mode("overwrite")
-            .save(str(out_path)))
+        checkpoint = Path(s.checkpoint_dir) / "silver" / "social_metrics"
+        out_path.mkdir(parents=True, exist_ok=True)
+        checkpoint.mkdir(parents=True, exist_ok=True)
 
-        return int(df.count())
-    finally:
-        if spark is not None:
+        latest_csv = out_path / "latest_metrics.csv"
+
+        def write_batch(batch_df, batch_id: int) -> None:
+            if batch_df.rdd.isEmpty():
+                return
+            deduped = batch_df.dropDuplicates(["artist", "window_start_ts", "window_end_ts"])
+            mode = "append"
+            target = deduped
+            if delta_enabled:
+                (target.write.format("delta")
+                    .mode(mode)
+                    .save(str(out_path)))
+            else:
+                (target.write.format("parquet")
+                    .mode(mode)
+                    .save(str(out_path)))
             try:
-                spark.stop()
+                pdf = deduped.toPandas()
+                pdf.sort_values("window_end_ts", inplace=True)
+                pdf.to_csv(latest_csv, index=False)
             except Exception:
                 pass
+
+        writer = (
+            results.writeStream
+            .outputMode("update")
+            .option("checkpointLocation", str(checkpoint))
+        )
+
+        if params.once:
+            writer = writer.trigger(availableNow=True)
+        else:
+            writer = writer.trigger(processingTime=f"{max(1, params.poll_interval_sec)} seconds")
+
+        query = writer.foreachBatch(write_batch).start()
+        query.awaitTermination()
+    finally:
+        try:
+            spark.stop()
+        except Exception:
+            pass
 
 
 def run_silver_stream(params: Optional[SilverParams] = None, fallback_local: Optional[bool] = None) -> None:
@@ -237,9 +234,9 @@ def run_silver_stream(params: Optional[SilverParams] = None, fallback_local: Opt
         return
 
     try:
-        n = _run_silver_rdd(params, log)
-        log.info(f"silver_groups={n}")
+        _run_structured_stream(params, log)
+        log.info("silver_stream_completed")
     except Exception as e:
-        log.info(f"silver_rdd_fallback_reason={e}")
+        log.info(f"silver_stream_fallback_reason={e}")
         n = _fallback_once(params)
         log.info(f"silver_fallback_groups={n}")

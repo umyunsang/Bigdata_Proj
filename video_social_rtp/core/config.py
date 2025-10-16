@@ -53,6 +53,9 @@ class Settings:
     log_dir: Path
     artifact_dir: Path
     yt_api_key: str | None = None
+    bronze_bloom_capacity: int = 500_000
+    bronze_bloom_error_rate: float = 0.01
+    bronze_bloom_lookback_days: int = 7
 
 
 def load_settings() -> Settings:
@@ -66,6 +69,9 @@ def load_settings() -> Settings:
     logs = _abs(os.environ.get("LOG_DIR", f"{project_root}/logs"))
     arts = _abs(os.environ.get("ARTIFACT_DIR", f"{project_root}/artifacts"))
     key = os.environ.get("YT_API_KEY") or os.environ.get("YOUTUBE_API_KEY")
+    bloom_capacity = int(os.environ.get("BRONZE_BLOOM_CAPACITY", "500000"))
+    bloom_error = float(os.environ.get("BRONZE_BLOOM_ERROR_RATE", "0.01"))
+    bloom_days = int(os.environ.get("BRONZE_BLOOM_LOOKBACK_DAYS", "7"))
     return Settings(
         project_root=project_root,
         landing_dir=landing,
@@ -76,6 +82,9 @@ def load_settings() -> Settings:
         log_dir=logs,
         artifact_dir=arts,
         yt_api_key=key,
+        bronze_bloom_capacity=bloom_capacity,
+        bronze_bloom_error_rate=bloom_error,
+        bronze_bloom_lookback_days=bloom_days,
     )
 
 
@@ -91,4 +100,3 @@ def ensure_dirs(s: Settings) -> None:
         s.artifact_dir,
     ]:
         p.mkdir(parents=True, exist_ok=True)
-

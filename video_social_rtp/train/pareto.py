@@ -116,6 +116,12 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
 
         assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
         assembled = assembler.transform(dataset).cache()
+        train_df, test_df = assembled.randomSplit([0.8, 0.2], seed=42)
+        train_count = train_df.count()
+        test_count = test_df.count()
+        if test_count == 0:
+            test_df = train_df
+            test_count = test_df.count()
 
         metrics = {
             "accuracy": MulticlassClassificationEvaluator(labelCol="tier_idx", metricName="accuracy"),
@@ -144,11 +150,11 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
         for name, estimator in models.items():
             start = time.time()
             pipeline = Pipeline(stages=[estimator])
-            model = pipeline.fit(assembled)
+            model = pipeline.fit(train_df)
             fit_ms = (time.time() - start) * 1000
 
             t0 = time.time()
-            predictions = model.transform(assembled)
+            predictions = model.transform(test_df)
             latency_ms = (time.time() - t0) * 1000
 
             accuracy = float(metrics["accuracy"].evaluate(predictions))
@@ -170,6 +176,7 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
                     import mlflow  # type: ignore
 
                     with mlflow.start_run(run_name=name):
+                        mlflow.log_params({"train_rows": train_count, "test_rows": test_count})
                         mlflow.log_params({"model": name, "feat_count": feat_count})
                         mlflow.log_metrics({"accuracy": accuracy, "f1": f1, "latency_ms": latency_ms, "fit_ms": fit_ms})
                 except Exception as exc:
@@ -178,6 +185,7 @@ def _train_spark(params: TrainParams) -> Dict[str, str]:
         pareto = _pareto_front(results)
         artifact = _save_pareto_artifact(results, pareto)
         log.info(f"pareto_artifact={artifact}")
+        assembled.unpersist()
         return {"artifact": str(artifact), "results": str(len(results)), "front": str(len(pareto))}
     finally:
         try:

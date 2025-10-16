@@ -99,7 +99,14 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                 if metrics_df is None:
                     raise FileNotFoundError(f"silver_metrics_not_found={silver_path}")
 
-                required_cols = {"artist", "window_start_ts", "window_end_ts", "engagement_count", "unique_videos", "unique_authors"}
+                required_cols = {
+                    "artist",
+                    "window_start_ts",
+                    "window_end_ts",
+                    "engagement_count",
+                    "unique_videos",
+                    "unique_authors",
+                }
                 missing = required_cols - set(metrics_df.columns)
                 if missing:
                     raise RuntimeError(f"silver_metrics_missing_columns={sorted(missing)}")
@@ -176,7 +183,6 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                     "unique_viewers_est",
                     F.when(F.col("unique_viewers_est").isNull(), F.col("window_unique_authors")).otherwise(F.col("unique_viewers_est")),
                 )
-
                 features_df = features_df.withColumn(
                     "growth_rate_7d",
                     F.when(F.col("prev_7_engagement") <= 0, F.lit(0.0)).otherwise(
@@ -193,7 +199,6 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                     "momentum",
                     F.col("growth_rate_7d") - F.col("growth_rate_30d"),
                 )
-
                 sum_window = Window.partitionBy(F.lit(1))
                 percent_window = Window.orderBy(F.col("total_engagement"))
 
@@ -204,7 +209,18 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                         F.col("total_engagement") / F.sum("total_engagement").over(sum_window),
                     ).otherwise(F.lit(0.0)),
                 )
+                features_df = features_df.withColumn(
+                    "engagement_pdf",
+                    F.when(
+                        F.sum("total_engagement").over(sum_window) > 0,
+                        F.col("total_engagement") / F.sum("total_engagement").over(sum_window),
+                    ).otherwise(F.lit(0.0)),
+                )
                 features_df = features_df.withColumn("percentile", F.percent_rank().over(percent_window))
+                features_df = features_df.withColumn(
+                    "engagement_cdf",
+                    F.sum("engagement_pdf").over(percent_window),
+                )
                 features_df = features_df.withColumn(
                     "tier",
                     F.when(F.col("percentile") >= 0.95, F.lit(1))
@@ -232,10 +248,24 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                     "momentum",
                     "volatility",
                     "market_share",
+                    "engagement_pdf",
+                    "engagement_cdf",
                     "percentile",
                     "tier",
                     "trend_direction",
                 ]
+
+                drop_cols = [
+                    "window_unique_videos",
+                    "window_unique_authors",
+                    "recent_7_engagement",
+                    "prev_7_engagement",
+                    "recent_30_engagement",
+                    "prev_30_engagement",
+                ]
+                for col in drop_cols:
+                    if col in features_df.columns:
+                        features_df = features_df.drop(col)
 
                 final_df = features_df.select(*final_cols)
                 final_df = final_df.orderBy(F.col("total_engagement").desc())
@@ -293,7 +323,7 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     if not files:
         empty = out_dir / "features.csv"
         empty.write_text(
-            "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,percentile,tier,trend_direction\n",
+            "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,engagement_pdf,engagement_cdf,percentile,tier,trend_direction\n",
             encoding="utf-8",
         )
         art = _write_artifact({"tier_cutoffs": {}, "generated_rows": 0, "generated_at": int(time.time())})
@@ -307,7 +337,7 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     if sm.empty or "artist" not in sm.columns:
         empty = out_dir / "features.csv"
         empty.write_text(
-            "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,percentile,tier,trend_direction\n",
+            "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,engagement_pdf,engagement_cdf,percentile,tier,trend_direction\n",
             encoding="utf-8",
         )
         art = _write_artifact({"tier_cutoffs": {}, "generated_rows": 0, "generated_at": int(time.time())})
@@ -318,7 +348,7 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     if sm.empty:
         empty = out_dir / "features.csv"
         empty.write_text(
-            "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,percentile,tier,trend_direction\n",
+            "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,engagement_pdf,engagement_cdf,percentile,tier,trend_direction\n",
             encoding="utf-8",
         )
         art = _write_artifact({"tier_cutoffs": {}, "generated_rows": 0, "generated_at": int(time.time())})
@@ -380,9 +410,11 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     features["growth_rate_7d"] = safe_growth(features["recent_7"], features["prev_7"])
     features["growth_rate_30d"] = safe_growth(features["recent_30"], features["prev_30"])
     features["momentum"] = features["growth_rate_7d"] - features["growth_rate_30d"]
-
     total_sum = features["total_engagement"].sum()
     features["market_share"] = np.where(total_sum > 0, features["total_engagement"] / total_sum, 0.0)
+    features["engagement_pdf"] = features["market_share"]
+    features = features.sort_values("total_engagement").reset_index(drop=True)
+    features["engagement_cdf"] = features["engagement_pdf"].cumsum()
     features["percentile"] = features["total_engagement"].rank(pct=True)
 
     def assign_tier(pct):
@@ -397,6 +429,14 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
     features["tier"] = features["percentile"].apply(assign_tier)
     features["trend_direction"] = np.where(features["growth_rate_7d"] > 5, "UP", np.where(features["growth_rate_7d"] < -5, "DOWN", "STEADY"))
 
+    features = features.sort_values("total_engagement", ascending=False).reset_index(drop=True)
+    features = features.drop(columns=[
+        "recent_7",
+        "prev_7",
+        "recent_30",
+        "prev_30",
+    ])
+
     final_cols = [
         "artist",
         "total_engagement",
@@ -409,6 +449,8 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
         "momentum",
         "volatility",
         "market_share",
+        "engagement_pdf",
+        "engagement_cdf",
         "percentile",
         "tier",
         "trend_direction",
