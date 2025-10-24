@@ -33,15 +33,33 @@ YouTube API v3
 ### Artist-Centric Data Model
 
 The pipeline extracts artist names from video titles/channels and partitions data by artist. Key features:
-- **Artist extraction**: Pattern matching from titles (e.g., "NewJeans", "뉴진스", "newjeans" → "NEWJEANS")
-- **Tier classification**: CDF-based dynamic cutoffs (Tier 1: top 5%, Tier 2: top 15%, Tier 3: top 40%, Tier 4: rest)
-- **Trend analysis**: Growth rates (7d, 30d), momentum, volatility (requires 7-30 days of data accumulation)
+
+**Artist Extraction** (from `core/artists.py`):
+- **Channel ID matching**: Prioritizes official YouTube channel IDs (e.g., `UC3IZKseVpdzPSBaWxBxundA` → "BLACKPINK")
+- **Pattern matching**: Falls back to title/text matching with 30+ K-POP artist patterns
+  - Example: "newjeans", "뉴진스" → "NEWJEANS"
+  - Example: "bts", "방탄소년단", "防弾少年団" → "BTS"
+- **Fallback**: Unknown artists labeled as "OTHER"
+- **Supported Artists**: BTS, BLACKPINK, TWICE, NEWJEANS, AESPA, LESSERAFIM, IVE, ITZY, NMIXX, SEVENTEEN, NCT, STRAYKIDS, ATEEZ, ENHYPEN, and 15+ more
+
+**Tier Classification**: CDF-based dynamic cutoffs (configurable via `--top-pct`):
+- **Tier 1**: Top performers (default: top 10%)
+- **Tier 2**: Upper mid-tier
+- **Tier 3**: Lower mid-tier
+- **Tier 4**: Baseline performers
+
+**Trend Analysis**: Requires multi-day data accumulation (7-30 days):
+- `growth_rate_7d`: 7-day engagement growth rate
+- `growth_rate_30d`: 30-day engagement growth rate
+- `momentum`: Acceleration/deceleration metric
+- `volatility`: Engagement variance over time
+- `trend_direction`: RISING/STEADY/FALLING classification
 
 ## Commands
 
-### Primary CLI (Recommended)
+### Primary CLI (Unified Entry Point)
 
-All commands use the unified CLI at `video_social_rtp.cli`:
+All commands use the unified CLI at `video_social_rtp.cli`. This is the **only recommended way** to run the pipeline:
 
 ```bash
 # 00. Create project structure
@@ -65,7 +83,7 @@ python -m video_social_rtp.cli silver --once
 python -m video_social_rtp.cli gold --top-pct 0.9
 
 # 04. Train models (Pareto Front selection)
-python -m video_social_rtp.cli train
+python -m video_social_rtp.cli train --no-mlflow
 
 # 05. Launch Streamlit UI
 python -m video_social_rtp.cli ui --port 8501
@@ -73,15 +91,24 @@ python -m video_social_rtp.cli ui --port 8501
 
 ### Makefile Shortcuts
 
+The Makefile provides shortcuts for CLI commands:
+
 ```bash
-make scaffold   # Directory setup
-make fetch_cli  # Fetch via CLI
-make bronze_cli # Bronze processing
-make silver_cli # Silver aggregation
-make gold_cli   # Gold features (--top-pct 0.9)
-make train_cli  # Model training
-make ui_cli     # Launch UI
+# CLI-based commands (recommended)
+make fetch_cli   # Run: python -m video_social_rtp.cli fetch
+make bronze_cli  # Run: python -m video_social_rtp.cli bronze
+make silver_cli  # Run: python -m video_social_rtp.cli silver
+make gold_cli    # Run: python -m video_social_rtp.cli gold --top-pct 0.9
+make train_cli   # Run: python -m video_social_rtp.cli train
+make ui_cli      # Run: python -m video_social_rtp.cli ui
+
+# Legacy snippet commands (NOT recommended - for reference only)
+make fetch       # Run old snippets (deprecated)
+make bronze      # Run old snippets (deprecated)
+make silver      # Run old snippets (deprecated)
 ```
+
+**Note**: The `make scaffold`, `make fetch`, `make bronze`, etc. targets point to old snippet files in `video-social-rtp-snippets/` and are kept for backward compatibility. **Always use the `_cli` suffix targets** or run CLI commands directly.
 
 ### Fallback Mode (No Spark/Delta)
 
@@ -91,6 +118,7 @@ Add `--fallback-local` to any stage to use Pandas/CSV instead of Spark/Delta:
 python -m video_social_rtp.cli bronze --fallback-local
 python -m video_social_rtp.cli silver --fallback-local
 python -m video_social_rtp.cli gold --fallback-local
+python -m video_social_rtp.cli train --fallback-local
 ```
 
 ## Configuration
@@ -101,12 +129,19 @@ python -m video_social_rtp.cli gold --fallback-local
 2. Set `YT_API_KEY` (optional - will auto-generate mock data if missing)
 3. Configure paths (defaults to `project/` subdirectories)
 
-**Key Environment Variables**:
-- `PROJECT_ROOT`: Base directory for all outputs (default: `project`)
-- `YT_API_KEY`: YouTube Data API v3 key
-- `LANDING_DIR`, `BRONZE_DIR`, `SILVER_DIR`, `GOLD_DIR`: Data lake paths
-- `CHECKPOINT_DIR`: Spark Structured Streaming checkpoints
-- `ARTIFACT_DIR`: MLflow runs, Pareto results, tier cutoffs
+**Key Environment Variables** (from `core/config.py`):
+- `PROJECT_ROOT`: Base directory for all outputs (default: `project/`)
+- `YT_API_KEY` or `YOUTUBE_API_KEY`: YouTube Data API v3 key (optional)
+- `LANDING_DIR`: Raw JSON landing zone (default: `${PROJECT_ROOT}/data/landing`)
+- `BRONZE_DIR`: Delta Lake bronze table (default: `${PROJECT_ROOT}/data/bronze`)
+- `SILVER_DIR`: Delta Lake silver table (default: `${PROJECT_ROOT}/data/silver`)
+- `GOLD_DIR`: Gold features output (default: `${PROJECT_ROOT}/data/gold`)
+- `CHECKPOINT_DIR`: Spark checkpoints (default: `${PROJECT_ROOT}/chk`)
+- `LOG_DIR`: Application logs (default: `${PROJECT_ROOT}/logs`)
+- `ARTIFACT_DIR`: Pareto results, tier cutoffs, Bloom filters (default: `${PROJECT_ROOT}/artifacts`)
+- `BRONZE_BLOOM_CAPACITY`: Bloom filter capacity (default: 500000)
+- `BRONZE_BLOOM_ERROR_RATE`: Bloom filter FPR (default: 0.01)
+- `BRONZE_BLOOM_LOOKBACK_DAYS`: Days to check for duplicates (default: 7)
 
 ### Dual-Mode Operation
 
@@ -196,37 +231,69 @@ Aggregated by `(window, artist)`. Columns:
 
 ### Gold Schema (Delta Table + CSV)
 
-One row per artist. Columns:
-- `artist`, `total_engagement`, `avg_engagement`, `max_engagement`
-- `total_videos`, `unique_viewers_est`
-- `growth_rate_7d`, `growth_rate_30d`, `momentum` (requires historical data)
-- `market_share`, `percentile`, `tier`, `trend_direction`
+One row per artist. Schema from `features/gold.py`:
+- `artist` (String): Artist name
+- `total_engagement` (Double): Sum of all engagement metrics
+- `avg_engagement` (Double): Average engagement per video
+- `max_engagement` (Double): Maximum engagement for any video
+- `total_videos` (Double): Total number of videos
+- `unique_viewers_est` (Double): HyperLogLog estimate of unique viewers
+- `growth_rate_7d` (Double): 7-day growth rate (requires historical data)
+- `growth_rate_30d` (Double): 30-day growth rate (requires historical data)
+- `momentum` (Double): Acceleration metric
+- `volatility` (Double): Engagement variance
+- `market_share` (Double): Percentage of total market engagement
+- `percentile` (Double): CDF percentile (0.0-1.0)
+- `tier` (Integer): Tier assignment (1-4)
+- `trend_direction` (String): RISING/STEADY/FALLING
 
-**Tier Assignment**: Uses `calculate_tier_cutoffs()` to compute percentiles (95th, 85th, 60th) from `total_engagement` distribution, then assigns Tier 1-4.
+**Tier Assignment**: Dynamic CDF-based cutoffs computed from engagement distribution:
+- **Tier 1**: Top performers (configurable, default top 10% via `--top-pct`)
+- **Tier 2**: Upper mid-tier
+- **Tier 3**: Lower mid-tier
+- **Tier 4**: Baseline
 
-**Artifacts**: `artifacts/gold_tiers.json` contains cutoff values and tier distribution stats.
+**Output Formats**:
+- Delta/Parquet table: `project/data/gold/features/`
+- CSV export: `project/data/gold/features.csv`
+- Artifacts: `project/artifacts/gold_tiers.json` (cutoff stats)
 
 ### Train Artifacts
 
-**Pareto Front**: `artifacts/pareto.json` contains model comparison metrics:
-- Models: Logistic Regression, Random Forest, Gradient Boosting Tree
-- Metrics: Accuracy, F1 Score, Inference Latency (ms), Feature Count
-- Pareto-optimal models flagged with `is_pareto: true`
+**Pareto Front**: `project/artifacts/pareto.json` contains model comparison results
+
+**Models Trained** (from `train/pareto.py`):
+- Logistic Regression
+- Random Forest Classifier
+
+**Evaluation Metrics**:
+- `accuracy`: Classification accuracy
+- `f1`: F1 score (weighted)
+- `latency_ms`: Inference latency in milliseconds
+- `feat_count`: Number of features used
+
+**Pareto Selection**: Non-dominated solutions selected using multi-objective optimization:
+- Maximize: accuracy, f1
+- Minimize: latency_ms, feat_count
+
+Models on the Pareto front are flagged for deployment consideration.
 
 ## Automation
 
-### 30-Day Data Accumulation
+### Data Collection Strategy
 
-Scripts in `scripts/`:
-- `daily_automation.sh`: Runs fetch→bronze→silver→gold twice daily
-- `weekly_analysis.sh`: Weekly reporting
-- `setup_cron.sh`: Configure cron jobs
+**Manual Execution**: The project is designed for manual execution via CLI commands. There are no automation scripts in the repository.
 
-**Cron Schedule** (from README):
+**Recommended Schedule** (if implementing automation):
 ```bash
-0 9,15 * * * /path/to/daily_automation.sh  # 9am, 3pm daily
-0 10 * * 0 /path/to/weekly_analysis.sh     # 10am Sunday
+# Twice daily execution (9am, 3pm KST)
+0 9,15 * * * cd /path/to/Bigdata_Proj && .venv/bin/python -m video_social_rtp.cli fetch && .venv/bin/python -m video_social_rtp.cli bronze && .venv/bin/python -m video_social_rtp.cli silver --once && .venv/bin/python -m video_social_rtp.cli gold
+
+# Weekly model retraining (Sunday 10am KST)
+0 10 * * 0 cd /path/to/Bigdata_Proj && .venv/bin/python -m video_social_rtp.cli train --no-mlflow
 ```
+
+**30-Day Accumulation Period**: The project was designed with a 30-day data collection window (2025-09-30 to 2025-10-30) to gather sufficient data for trend analysis features (7d/30d growth rates, momentum).
 
 ## Algorithm References
 
@@ -276,19 +343,33 @@ Scripts in `scripts/`:
 ## Important Gotchas
 
 ### Mock Data Auto-Generation
-If `YT_API_KEY` not set, `ingest/youtube.py` synthesizes realistic mock events. This is intentional for API-keyless testing.
+If `YT_API_KEY` not set, `ingest/youtube.py` synthesizes realistic mock events. This is intentional for API-keyless testing and development.
 
 ### Marker Files Prevent Re-Fetching
-`landing/_markers/{query}_{date}.json` prevents duplicate fetches of same query on same day. Delete marker to force re-fetch.
+Landing directory contains `_markers/` subdirectory with files like `{query}_{date}.json` to prevent duplicate fetches of the same query on the same day. Use `--no-skip-if-exists` flag to force re-fetch.
 
-### Empty Gold Table Handling
-`features/gold.py` includes guards for empty Silver input (returns empty results, not errors).
+### Empty Input Handling
+All stages include guards for empty input:
+- Bronze: Skips processing if no landing files
+- Silver: Returns empty DataFrame if no Bronze data
+- Gold: Emits empty table with correct schema if no Silver data
+- Train: Raises FileNotFoundError if Gold features missing
 
-### Spark Local Binding
-If seeing "Service 'sparkDriver' could not bind" errors, set `SPARK_LOCAL_IP=127.0.0.1` in `.env`.
+### Bloom Filter Persistence
+Bronze stage saves Bloom filter to:
+- Binary: `project/artifacts/bronze_bloom.bin`
+- Metadata: `project/artifacts/bronze_bloom.json`
 
-### MLflow Dependency
-Train stage checks if `mlflow` is importable. If not installed or `--no-mlflow` flag set, skips MLflow logging (doesn't fail).
+The filter is rebuilt from last 7 days of Bronze data if artifacts missing or invalid.
+
+### Spark Local Binding Issues
+If seeing "Service 'sparkDriver' could not bind" errors, set `SPARK_LOCAL_IP=127.0.0.1` in `.env` or environment.
+
+### MLflow Optional Dependency
+Train stage checks if `mlflow` is importable. Use `--no-mlflow` flag to skip MLflow logging (won't fail if MLflow not installed).
+
+### Delta Lake Format Detection
+All stages try reading Delta format first, then fall back to Parquet. This allows graceful degradation when Delta Lake extensions are not available.
 
 ## Project Context
 
@@ -296,8 +377,44 @@ Train stage checks if `mlflow` is importable. If not installed or `--no-mlflow` 
 
 **Data Domain**: K-POP YouTube analytics (artist popularity trends)
 
-**Timeline**: 30-day data accumulation period (2025-09-30 to 2025-10-30) via cron automation
+**Timeline**: 30-day data accumulation period (2025-09-30 to 2025-10-30) for manual data collection
 
-**Documentation**: See `docs/` for stage-by-stage design docs (00-05), `submission/보고서_최종.md` for final report
+**Documentation**:
+- `docs/00~05_*.md`: Stage-by-stage design documents in Korean
+- `docs/experiment_log_20251016.md`: Execution log with BTS official data
+- `README.md`: Project overview and usage guide
+- `CLAUDE.md`: This file (AI assistant guidance)
+
+**Directory Structure**:
+```
+/home/student_15030/Bigdata_Proj/
+├── video_social_rtp/        # Main package (unified CLI)
+│   ├── cli.py               # CLI entry point
+│   ├── core/                # Config, Spark, Bloom, Sampling, Artists
+│   ├── ingest/              # YouTube API ingestion
+│   ├── bronze/              # Bronze batch processing
+│   ├── silver/              # Silver streaming
+│   ├── features/            # Gold feature engineering
+│   ├── train/               # Pareto model training
+│   └── serve/               # Streamlit UI
+├── video-social-rtp-snippets/  # Legacy code snippets (deprecated)
+├── 실습자료_2024/           # Lab materials and notebooks
+├── docs/                    # Documentation
+├── examples/                # Example scripts
+├── project/                 # Data output directory
+│   ├── data/
+│   │   ├── landing/        # Raw JSON (NDJSON)
+│   │   ├── bronze/         # Delta Lake bronze
+│   │   ├── silver/         # Delta Lake silver
+│   │   └── gold/           # CSV features
+│   ├── chk/                # Spark checkpoints
+│   ├── artifacts/          # Bloom filters, Pareto results
+│   ├── logs/               # Application logs
+│   └── tmp/                # Temporary files
+├── Makefile                # Command shortcuts
+├── requirements.txt        # Python dependencies
+├── .env                    # Environment configuration
+└── README.md              # Project overview
+```
 
 **Dual-Language Codebase**: Comments/docs in Korean and English
