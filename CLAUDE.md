@@ -82,8 +82,8 @@ python -m video_social_rtp.cli silver --once
 # 03. Gold layer (CDF-based tier labeling)
 python -m video_social_rtp.cli gold --top-pct 0.9
 
-# 04. Train models (Pareto Front selection)
-python -m video_social_rtp.cli train --no-mlflow
+# 04. Train models (Pareto Front selection with MLflow tracking)
+python -m video_social_rtp.cli train
 
 # 05. Launch Streamlit UI
 python -m video_social_rtp.cli ui --port 8501
@@ -365,8 +365,22 @@ The filter is rebuilt from last 7 days of Bronze data if artifacts missing or in
 ### Spark Local Binding Issues
 If seeing "Service 'sparkDriver' could not bind" errors, set `SPARK_LOCAL_IP=127.0.0.1` in `.env` or environment.
 
-### MLflow Optional Dependency
-Train stage checks if `mlflow` is importable. Use `--no-mlflow` flag to skip MLflow logging (won't fail if MLflow not installed).
+### MLflow Experiment Tracking
+Train stage uses MLflow for experiment tracking and model versioning:
+- **Tracking URI**: `file://project/artifacts/mlruns`
+- **Experiment Name**: `train_pareto`
+- **Logged Metrics**: accuracy, f1, latency_ms
+- **Logged Params**: model_type, hyperparameters
+- **Artifacts**: Spark ML Pipeline models
+
+**MLflow UI**:
+```bash
+cd project/artifacts
+mlflow ui --port 5000
+# Access at http://localhost:5000
+```
+
+**Disable MLflow** (not recommended): Use `--no-mlflow` flag only for debugging or when MLflow is unavailable.
 
 ### Delta Lake Format Detection
 All stages try reading Delta format first, then fall back to Parquet. This allows graceful degradation when Delta Lake extensions are not available.
