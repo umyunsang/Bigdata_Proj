@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from datetime import date
+from datetime import datetime, date
 import hashlib
 
 from ..core.config import load_settings, ensure_dirs
@@ -23,10 +23,23 @@ class IngestParams:
     source: str = "yt"
     region_code: Optional[str] = None  # e.g., "KR"
     relevance_language: Optional[str] = None  # e.g., "ko"
+    published_after: Optional[str] = "2024-01-01T00:00:00Z"  # RFC 3339 format
+    published_before: Optional[str] = "2024-12-31T23:59:59Z"  # RFC 3339 format
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _parse_published_at(published_at_str: str) -> int:
+    """Parse YouTube publishedAt ISO 8601 string to milliseconds timestamp"""
+    try:
+        # YouTube API returns ISO 8601 format: "2024-01-15T10:30:00Z"
+        dt = datetime.fromisoformat(published_at_str.replace('Z', '+00:00'))
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        # Fallback to current time if parsing fails
+        return _now_ms()
 
 
 def _mock_events(p: IngestParams) -> List[Dict]:
@@ -97,14 +110,22 @@ def fetch_to_landing(params: Optional[IngestParams] = None, use_mock: Optional[b
         else:
             try:
                 yt = build("youtube", "v3", developerKey=api_key)
-                req = yt.search().list(
-                    q=params.query,
-                    part="snippet",
-                    type="video",
-                    maxResults=min(params.max_items, 50),
-                    regionCode=params.region_code,
-                    relevanceLanguage=params.relevance_language,
-                )
+                api_params = {
+                    "q": params.query,
+                    "part": "snippet",
+                    "type": "video",
+                    "maxResults": min(params.max_items, 50),
+                }
+                if params.region_code:
+                    api_params["regionCode"] = params.region_code
+                if params.relevance_language:
+                    api_params["relevanceLanguage"] = params.relevance_language
+                if params.published_after:
+                    api_params["publishedAfter"] = params.published_after
+                if params.published_before:
+                    api_params["publishedBefore"] = params.published_before
+
+                req = yt.search().list(**api_params)
                 res = req.execute()
                 items = []
                 for i, it in enumerate(res.get("items", [])):
@@ -114,11 +135,14 @@ def fetch_to_landing(params: Optional[IngestParams] = None, use_mock: Optional[b
                     if not vid:
                         # skip items without videoId
                         continue
+                    # Use video's published date instead of current time
+                    published_at = snip.get("publishedAt", "")
+                    timestamp = _parse_published_at(published_at) if published_at else _now_ms()
                     items.append({
                         "post_id": f"search{i}_{vid}",
                         "text": snip.get("title", ""),
                         "lang": params.lang,
-                        "ts": _now_ms(),
+                        "ts": timestamp,
                         "author_id": snip.get("channelId", ""),
                         "video_id": vid,
                         "source": params.source,

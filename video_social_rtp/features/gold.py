@@ -35,9 +35,15 @@ def _gold_schema() -> StructType:
             StructField("artist", StringType(), True),
             StructField("quarter", StringType(), True),
             StructField("total_engagement", DoubleType(), True),
+            StructField("avg_engagement", DoubleType(), True),
             StructField("total_videos", DoubleType(), True),
             StructField("unique_authors", DoubleType(), True),
+            StructField("unique_viewers_est", DoubleType(), True),
             StructField("growth_qoq", DoubleType(), True),
+            StructField("growth_rate_7d", DoubleType(), True),
+            StructField("growth_rate_30d", DoubleType(), True),
+            StructField("momentum", DoubleType(), True),
+            StructField("volatility", DoubleType(), True),
             StructField("market_share", DoubleType(), True),
             StructField("percentile", DoubleType(), True),
             StructField("tier", IntegerType(), True),
@@ -56,7 +62,7 @@ def _emit_empty_gold(settings, spark, delta_enabled, log):
 
     csv_path = Path(settings.gold_dir) / "features.csv"
     csv_path.write_text(
-        "artist,quarter,total_engagement,total_videos,unique_authors,growth_qoq,market_share,percentile,tier,trend_direction\n",
+        "artist,quarter,total_engagement,avg_engagement,total_videos,unique_authors,unique_viewers_est,growth_qoq,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,percentile,tier,trend_direction\n",
         encoding="utf-8",
     )
 
@@ -117,10 +123,24 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                 # Silver already computed growth_qoq and market_share per quarter
                 # Now we add percentile and tier based on total_engagement per quarter
 
+                # Calculate momentum as acceleration of growth (difference from previous quarter's growth)
+                artist_window = Window.partitionBy("artist").orderBy("quarter")
+                features_df = metrics_df.withColumn(
+                    "prev_growth_qoq",
+                    F.lag("growth_qoq", 1).over(artist_window)
+                )
+                features_df = features_df.withColumn(
+                    "momentum",
+                    F.when(F.col("prev_growth_qoq").isNotNull(),
+                           F.col("growth_qoq") - F.col("prev_growth_qoq"))
+                    .otherwise(F.lit(0.0))
+                )
+                features_df = features_df.drop("prev_growth_qoq")
+
                 # Calculate percentile within each quarter
                 percent_window = Window.partitionBy("quarter").orderBy(F.col("total_engagement"))
 
-                features_df = metrics_df.withColumn("percentile", F.percent_rank().over(percent_window))
+                features_df = features_df.withColumn("percentile", F.percent_rank().over(percent_window))
 
                 # Assign tier based on percentile (per quarter)
                 features_df = features_df.withColumn(
@@ -139,14 +159,32 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                     .otherwise(F.lit("STEADY")),
                 )
 
+                # Add additional columns for compatibility with Train stage
+                features_df = features_df.withColumn(
+                    "avg_engagement",
+                    F.when(F.col("total_videos") > 0,
+                           F.col("total_engagement") / F.col("total_videos"))
+                    .otherwise(F.lit(0.0))
+                )
+                features_df = features_df.withColumn("unique_viewers_est", F.col("unique_authors"))
+                features_df = features_df.withColumn("growth_rate_7d", F.lit(0.0))  # N/A for quarterly data
+                features_df = features_df.withColumn("growth_rate_30d", F.col("growth_qoq"))  # Use QoQ as proxy
+                features_df = features_df.withColumn("volatility", F.lit(0.0))  # N/A for quarterly data
+
                 out = Path(s.gold_dir) / "features"
                 final_cols = [
                     "artist",
                     "quarter",
                     "total_engagement",
+                    "avg_engagement",
                     "total_videos",
                     "unique_authors",
+                    "unique_viewers_est",
                     "growth_qoq",
+                    "growth_rate_7d",
+                    "growth_rate_30d",
+                    "momentum",
+                    "volatility",
                     "market_share",
                     "percentile",
                     "tier",

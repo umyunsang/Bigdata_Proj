@@ -142,7 +142,7 @@ def main() -> None:
         if analyze_button and user_input and bloom is not None:
             # Check if input looks like video_id (starts with 'v' or is alphanumeric)
             check_key = f"search_{user_input}" if not user_input.startswith('v') else user_input
-            is_present = bloom.contains(check_key)
+            is_present = bloom.might_contain(check_key)
 
             # Calculate probability based on Bloom filter FPR
             fpr = bloom_meta.get('fpr', 0.01) if bloom_meta else 0.01
