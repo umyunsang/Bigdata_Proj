@@ -113,11 +113,14 @@ def collect_date_range_data(
                 if not vid:
                     continue
 
-                # 실제 publish 시간을 타임스탬프로 변환
+                # 실제 publish 시간을 타임스탬프로 변환 (중요!)
                 published_at = snippet.get("publishedAt", "")
                 try:
-                    ts = int(datetime.fromisoformat(published_at.replace('Z', '+00:00')).timestamp() * 1000)
-                except:
+                    # ISO 8601 format: 2024-01-15T12:34:56Z
+                    pub_dt = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+                    ts = int(pub_dt.timestamp() * 1000)
+                except Exception as e:
+                    # Fallback to day start time if parsing fails
                     ts = int(start_date.timestamp() * 1000)
 
                 day_items.append({

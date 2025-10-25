@@ -54,10 +54,11 @@ def bronze(fallback_local: bool | None) -> None:
 @click.option("--window", "window_size", default="1 hour", show_default=True)
 @click.option("--slide", "window_slide", default="5 minutes", show_default=True)
 @click.option("--once/--no-once", "once", default=True, show_default=True, help="Trigger once and exit (Spark)")
+@click.option("--batch-mode/--no-batch-mode", "batch_mode", default=False, show_default=True, help="Read from Bronze in batch mode for historical data")
 @click.option("--fallback-local/--no-fallback-local", "fallback_local", default=None)
-def silver(watermark: str, window_size: str, window_slide: str, once: bool, fallback_local: bool | None) -> None:
+def silver(watermark: str, window_size: str, window_slide: str, once: bool, batch_mode: bool, fallback_local: bool | None) -> None:
     """Streaming window aggregates to Silver (Step 02)."""
-    params = SilverParams(watermark=watermark, window_size=window_size, window_slide=window_slide, once=once)
+    params = SilverParams(watermark=watermark, window_size=window_size, window_slide=window_slide, once=once, batch_mode=batch_mode)
     run_silver_stream(params=params, fallback_local=fallback_local)
 
 

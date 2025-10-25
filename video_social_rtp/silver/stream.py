@@ -24,6 +24,7 @@ class SilverParams:
     poll_interval_sec: int = 5
     iterations: int = 0  # fallback loop count; 0 means single pass
     once: bool = False   # Spark trigger once
+    batch_mode: bool = False  # Read from Bronze in batch mode for historical data
 
 
 def _parse_minutes(spec: str) -> int:
@@ -110,6 +111,116 @@ def _fallback_once(params: SilverParams) -> int:
     # naive checkpoint marker
     (chk_dir / "_fallback_marker").write_text(str(int(time.time())), encoding="utf-8")
     return len(counts)
+
+
+def _run_batch_from_bronze(params: SilverParams, log) -> None:
+    """Batch mode: Read from Bronze Delta table and output quarterly aggregation"""
+    s = load_settings()
+    ensure_dirs(s)
+
+    spark, delta_enabled = get_spark_session("silver_batch", s, log=log)
+    try:
+        # Read from Bronze Delta table
+        bronze_df = spark.read.format('delta').load(str(s.bronze_dir))
+
+        # Process events with quarter calculation
+        events = (
+            bronze_df
+            .dropna(subset=["post_id", "video_id", "ts", "artist"])
+            .withColumn("event_time", F.to_timestamp(F.from_unixtime(F.col("ts") / 1000)))
+            .dropDuplicates(["post_id"])
+            .withColumn("year", F.year("event_time"))
+            .withColumn("month", F.month("event_time"))
+            .withColumn("quarter", F.concat(
+                F.col("year"),
+                F.lit("-Q"),
+                F.when(F.col("month") <= 3, F.lit(1))
+                .when(F.col("month") <= 6, F.lit(2))
+                .when(F.col("month") <= 9, F.lit(3))
+                .otherwise(F.lit(4))
+            ))
+        )
+
+        # Aggregate by quarter and artist
+        quarterly = (
+            events
+            .groupBy("quarter", "artist")
+            .agg(
+                F.count("*").alias("total_engagement"),
+                F.approx_count_distinct("video_id").alias("total_videos"),
+                F.approx_count_distinct("author_id").alias("unique_authors"),
+                (F.min(F.col("ts"))).alias("quarter_start_ts"),
+                (F.max(F.col("ts"))).alias("quarter_end_ts"),
+            )
+            .orderBy("quarter", F.col("total_engagement").desc())
+        )
+
+        # Calculate quarter-over-quarter growth
+        from pyspark.sql.window import Window
+        window_spec = Window.partitionBy("artist").orderBy("quarter")
+
+        quarterly_with_growth = (
+            quarterly
+            .withColumn("prev_engagement", F.lag("total_engagement").over(window_spec))
+            .withColumn("growth_qoq",
+                F.when(F.col("prev_engagement").isNotNull(),
+                    ((F.col("total_engagement") - F.col("prev_engagement")) / F.col("prev_engagement") * 100)
+                ).otherwise(0.0)
+            )
+            .drop("prev_engagement")
+        )
+
+        # Calculate market share per quarter
+        quarter_totals = (
+            quarterly_with_growth
+            .groupBy("quarter")
+            .agg(F.sum("total_engagement").alias("quarter_total"))
+        )
+
+        quarterly_final = (
+            quarterly_with_growth
+            .join(quarter_totals, on="quarter", how="left")
+            .withColumn("market_share",
+                (F.col("total_engagement") / F.col("quarter_total") * 100)
+            )
+            .drop("quarter_total")
+            .select(
+                "quarter", "artist", "total_engagement", "total_videos",
+                "unique_authors", "growth_qoq", "market_share",
+                "quarter_start_ts", "quarter_end_ts"
+            )
+        )
+
+        # Write to Silver (Delta/Parquet)
+        out_path = Path(s.silver_dir) / "social_metrics"
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        if delta_enabled:
+            (quarterly_final.write.format("delta")
+                .mode("overwrite")
+                .option("overwriteSchema", "true")
+                .save(str(out_path)))
+        else:
+            (quarterly_final.write.format("parquet")
+                .mode("overwrite")
+                .save(str(out_path)))
+
+        # Write quarterly CSV for UI
+        quarterly_csv = out_path / "quarterly_metrics.csv"
+        try:
+            quarterly_pdf = quarterly_final.toPandas()
+            quarterly_pdf.to_csv(quarterly_csv, index=False)
+            log.info(f"silver_quarterly_csv_written={quarterly_csv}")
+            print(f"💾 Quarterly CSV exported: {quarterly_csv} ({len(quarterly_pdf)} rows)")
+        except Exception as e:
+            log.warning(f"silver_quarterly_csv_failed={e}")
+
+        row_count = quarterly_final.count()
+        log.info(f"silver_batch_completed rows={row_count}")
+        print(f"✅ Silver batch completed: {row_count} quarterly aggregations")
+
+    finally:
+        spark.stop()
 
 
 def _run_structured_stream(params: SilverParams, log) -> None:
@@ -233,6 +344,17 @@ def run_silver_stream(params: Optional[SilverParams] = None, fallback_local: Opt
         log.info(f"silver_fallback_groups={n}")
         return
 
+    # Batch mode: read from Bronze for historical data
+    if params.batch_mode:
+        try:
+            _run_batch_from_bronze(params, log)
+            log.info("silver_batch_completed")
+            return
+        except Exception as e:
+            log.error(f"silver_batch_failed={e}")
+            raise
+
+    # Streaming mode: read from Landing
     try:
         _run_structured_stream(params, log)
         log.info("silver_stream_completed")

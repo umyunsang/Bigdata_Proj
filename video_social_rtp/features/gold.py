@@ -33,15 +33,11 @@ def _gold_schema() -> StructType:
     return StructType(
         [
             StructField("artist", StringType(), True),
+            StructField("quarter", StringType(), True),
             StructField("total_engagement", DoubleType(), True),
-            StructField("avg_engagement", DoubleType(), True),
-            StructField("max_engagement", DoubleType(), True),
             StructField("total_videos", DoubleType(), True),
-            StructField("unique_viewers_est", DoubleType(), True),
-            StructField("growth_rate_7d", DoubleType(), True),
-            StructField("growth_rate_30d", DoubleType(), True),
-            StructField("momentum", DoubleType(), True),
-            StructField("volatility", DoubleType(), True),
+            StructField("unique_authors", DoubleType(), True),
+            StructField("growth_qoq", DoubleType(), True),
             StructField("market_share", DoubleType(), True),
             StructField("percentile", DoubleType(), True),
             StructField("tier", IntegerType(), True),
@@ -55,11 +51,12 @@ def _emit_empty_gold(settings, spark, delta_enabled, log):
     out = Path(settings.gold_dir) / "features"
     (empty_df.write.format("delta" if delta_enabled else "parquet")
         .mode("overwrite")
+        .option("overwriteSchema", "true")
         .save(str(out)))
 
     csv_path = Path(settings.gold_dir) / "features.csv"
     csv_path.write_text(
-        "artist,total_engagement,avg_engagement,max_engagement,total_videos,unique_viewers_est,growth_rate_7d,growth_rate_30d,momentum,volatility,market_share,percentile,tier,trend_direction\n",
+        "artist,quarter,total_engagement,total_videos,unique_authors,growth_qoq,market_share,percentile,tier,trend_direction\n",
         encoding="utf-8",
     )
 
@@ -99,13 +96,15 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                 if metrics_df is None:
                     raise FileNotFoundError(f"silver_metrics_not_found={silver_path}")
 
+                # Silver now outputs quarterly data with these columns
                 required_cols = {
+                    "quarter",
                     "artist",
-                    "window_start_ts",
-                    "window_end_ts",
-                    "engagement_count",
-                    "unique_videos",
+                    "total_engagement",
+                    "total_videos",
                     "unique_authors",
+                    "growth_qoq",
+                    "market_share",
                 }
                 missing = required_cols - set(metrics_df.columns)
                 if missing:
@@ -115,112 +114,15 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                 if metrics_df.rdd.isEmpty():
                     return _emit_empty_gold(s, spark, delta_enabled, log)
 
-                metrics_df = metrics_df.withColumn("window_end_ts", F.col("window_end_ts").cast("long"))
-                max_ts = metrics_df.agg(F.max("window_end_ts").alias("max_ts")).collect()[0]["max_ts"]
-                if max_ts is None:
-                    return _emit_empty_gold(s, spark, delta_enabled, log)
+                # Silver already computed growth_qoq and market_share per quarter
+                # Now we add percentile and tier based on total_engagement per quarter
 
-                window_ms = {
-                    "7d": 7 * 24 * 60 * 60 * 1000,
-                    "30d": 30 * 24 * 60 * 60 * 1000,
-                }
+                # Calculate percentile within each quarter
+                percent_window = Window.partitionBy("quarter").orderBy(F.col("total_engagement"))
 
-                metrics_df = (
-                    metrics_df
-                    .withColumn("recent_7", F.when(F.col("window_end_ts") >= max_ts - window_ms["7d"], F.col("engagement_count")).otherwise(F.lit(0)))
-                    .withColumn("prev_7", F.when((F.col("window_end_ts") < max_ts - window_ms["7d"]) & (F.col("window_end_ts") >= max_ts - 2 * window_ms["7d"]), F.col("engagement_count")).otherwise(F.lit(0)))
-                    .withColumn("recent_30", F.when(F.col("window_end_ts") >= max_ts - window_ms["30d"], F.col("engagement_count")).otherwise(F.lit(0)))
-                    .withColumn("prev_30", F.when((F.col("window_end_ts") < max_ts - window_ms["30d"]) & (F.col("window_end_ts") >= max_ts - 2 * window_ms["30d"]), F.col("engagement_count")).otherwise(F.lit(0)))
-                )
+                features_df = metrics_df.withColumn("percentile", F.percent_rank().over(percent_window))
 
-                agg_silver = (
-                    metrics_df.groupBy("artist")
-                    .agg(
-                        F.sum("engagement_count").alias("total_engagement"),
-                        F.avg("engagement_count").alias("avg_engagement"),
-                        F.max("engagement_count").alias("max_engagement"),
-                        F.sum("unique_videos").alias("window_unique_videos"),
-                        F.sum("unique_authors").alias("window_unique_authors"),
-                        F.sum("recent_7").alias("recent_7_engagement"),
-                        F.sum("prev_7").alias("prev_7_engagement"),
-                        F.sum("recent_30").alias("recent_30_engagement"),
-                        F.sum("prev_30").alias("prev_30_engagement"),
-                        F.stddev_pop("engagement_count").alias("volatility"),
-                    )
-                )
-
-                bronze_stats = None
-                bronze_path = Path(s.bronze_dir)
-                for fmt in formats:
-                    try:
-                        bronze_df = spark.read.format(fmt).load(str(bronze_path))
-                    except Exception:
-                        continue
-                    else:
-                        if "artist" not in bronze_df.columns:
-                            bronze_stats = None
-                            continue
-                        bronze_stats = (
-                            bronze_df.groupBy("artist")
-                            .agg(
-                                F.countDistinct("video_id").alias("total_videos"),
-                                F.approx_count_distinct("author_id").alias("unique_viewers_est"),
-                            )
-                        )
-                        break
-
-                if bronze_stats is not None:
-                    features_df = agg_silver.join(bronze_stats, "artist", "left")
-                else:
-                    features_df = agg_silver
-
-                features_df = features_df.fillna({"volatility": 0.0})
-                features_df = features_df.withColumn(
-                    "total_videos",
-                    F.when(F.col("total_videos").isNull(), F.col("window_unique_videos")).otherwise(F.col("total_videos")),
-                )
-                features_df = features_df.withColumn(
-                    "unique_viewers_est",
-                    F.when(F.col("unique_viewers_est").isNull(), F.col("window_unique_authors")).otherwise(F.col("unique_viewers_est")),
-                )
-                features_df = features_df.withColumn(
-                    "growth_rate_7d",
-                    F.when(F.col("prev_7_engagement") <= 0, F.lit(0.0)).otherwise(
-                        (F.col("recent_7_engagement") - F.col("prev_7_engagement")) / F.col("prev_7_engagement") * 100.0
-                    ),
-                )
-                features_df = features_df.withColumn(
-                    "growth_rate_30d",
-                    F.when(F.col("prev_30_engagement") <= 0, F.lit(0.0)).otherwise(
-                        (F.col("recent_30_engagement") - F.col("prev_30_engagement")) / F.col("prev_30_engagement") * 100.0
-                    ),
-                )
-                features_df = features_df.withColumn(
-                    "momentum",
-                    F.col("growth_rate_7d") - F.col("growth_rate_30d"),
-                )
-                sum_window = Window.partitionBy(F.lit(1))
-                percent_window = Window.orderBy(F.col("total_engagement"))
-
-                features_df = features_df.withColumn(
-                    "market_share",
-                    F.when(
-                        F.sum("total_engagement").over(sum_window) > 0,
-                        F.col("total_engagement") / F.sum("total_engagement").over(sum_window),
-                    ).otherwise(F.lit(0.0)),
-                )
-                features_df = features_df.withColumn(
-                    "engagement_pdf",
-                    F.when(
-                        F.sum("total_engagement").over(sum_window) > 0,
-                        F.col("total_engagement") / F.sum("total_engagement").over(sum_window),
-                    ).otherwise(F.lit(0.0)),
-                )
-                features_df = features_df.withColumn("percentile", F.percent_rank().over(percent_window))
-                features_df = features_df.withColumn(
-                    "engagement_cdf",
-                    F.sum("engagement_pdf").over(percent_window),
-                )
+                # Assign tier based on percentile (per quarter)
                 features_df = features_df.withColumn(
                     "tier",
                     F.when(F.col("percentile") >= 0.95, F.lit(1))
@@ -228,50 +130,35 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                     .when(F.col("percentile") >= 0.60, F.lit(3))
                     .otherwise(F.lit(4)),
                 )
+
+                # Assign trend_direction based on growth_qoq
                 features_df = features_df.withColumn(
                     "trend_direction",
-                    F.when(F.col("growth_rate_7d") > 5, F.lit("UP"))
-                    .when(F.col("growth_rate_7d") < -5, F.lit("DOWN"))
+                    F.when(F.col("growth_qoq") > 10, F.lit("UP"))
+                    .when(F.col("growth_qoq") < -10, F.lit("DOWN"))
                     .otherwise(F.lit("STEADY")),
                 )
 
                 out = Path(s.gold_dir) / "features"
                 final_cols = [
                     "artist",
+                    "quarter",
                     "total_engagement",
-                    "avg_engagement",
-                    "max_engagement",
                     "total_videos",
-                    "unique_viewers_est",
-                    "growth_rate_7d",
-                    "growth_rate_30d",
-                    "momentum",
-                    "volatility",
+                    "unique_authors",
+                    "growth_qoq",
                     "market_share",
-                    "engagement_pdf",
-                    "engagement_cdf",
                     "percentile",
                     "tier",
                     "trend_direction",
                 ]
 
-                drop_cols = [
-                    "window_unique_videos",
-                    "window_unique_authors",
-                    "recent_7_engagement",
-                    "prev_7_engagement",
-                    "recent_30_engagement",
-                    "prev_30_engagement",
-                ]
-                for col in drop_cols:
-                    if col in features_df.columns:
-                        features_df = features_df.drop(col)
-
                 final_df = features_df.select(*final_cols)
-                final_df = final_df.orderBy(F.col("total_engagement").desc())
+                final_df = final_df.orderBy("quarter", F.col("total_engagement").desc())
 
                 (final_df.write.format("delta" if delta_enabled else "parquet")
                     .mode("overwrite")
+                    .option("overwriteSchema", "true")
                     .save(str(out)))
 
                 row_count = final_df.count()
@@ -282,20 +169,14 @@ def run_gold_features(params: Optional[GoldParams] = None, fallback_local: Optio
                 except Exception as exc:
                     log.info(f"gold_csv_write_failed={exc}")
 
-                percentile_stats = features_df.agg(
-                    F.expr("percentile_approx(total_engagement, 0.95, 1000)").alias("tier_1"),
-                    F.expr("percentile_approx(total_engagement, 0.85, 1000)").alias("tier_2"),
-                    F.expr("percentile_approx(total_engagement, 0.60, 1000)").alias("tier_3"),
-                ).collect()[0]
+                # Calculate tier distribution per quarter
+                tier_dist = features_df.groupBy("quarter", "tier").count().orderBy("quarter", "tier").collect()
 
                 artifact_payload = {
-                    "tier_cutoffs": {
-                        "tier_1": float(percentile_stats["tier_1"]) if percentile_stats["tier_1"] is not None else 0.0,
-                        "tier_2": float(percentile_stats["tier_2"]) if percentile_stats["tier_2"] is not None else 0.0,
-                        "tier_3": float(percentile_stats["tier_3"]) if percentile_stats["tier_3"] is not None else 0.0,
-                    },
+                    "tier_distribution": [{"quarter": row["quarter"], "tier": row["tier"], "count": row["count"]} for row in tier_dist],
                     "generated_rows": int(row_count),
                     "generated_at": int(time.time()),
+                    "analysis_mode": "quarterly",
                 }
 
                 art = _write_artifact(artifact_payload)
