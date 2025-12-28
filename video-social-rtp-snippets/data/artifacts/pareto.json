@@ -1,0 +1,47 @@
+{
+  "all_results": [
+    {
+      "name": "lr",
+      "accuracy": 1.0,
+      "f1": 1.0,
+      "latency_ms": 45.36,
+      "feat_count": 7,
+      "train_time_s": 4.91
+    },
+    {
+      "name": "rf",
+      "accuracy": 1.0,
+      "f1": 1.0,
+      "latency_ms": 34.95,
+      "feat_count": 7,
+      "train_time_s": 1.29
+    },
+    {
+      "name": "dt",
+      "accuracy": 1.0,
+      "f1": 1.0,
+      "latency_ms": 32.36,
+      "feat_count": 7,
+      "train_time_s": 0.81
+    }
+  ],
+  "pareto_front": [
+    {
+      "name": "dt",
+      "accuracy": 1.0,
+      "f1": 1.0,
+      "latency_ms": 32.36,
+      "feat_count": 7,
+      "train_time_s": 0.81
+    }
+  ],
+  "feature_columns": [
+    "total_engagement",
+    "avg_engagement",
+    "max_engagement",
+    "total_videos",
+    "unique_viewers_est",
+    "volatility",
+    "market_share"
+  ]
+}
